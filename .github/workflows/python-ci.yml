@@ -1,0 +1,15 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    uses: unohee/ci-templates/.github/workflows/python-ci.yml@main
+    with:
+      python-version: '3.12'
+      src-path: 'src/'
+      test-path: 'tests/'
+    secrets: inherit

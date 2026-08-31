@@ -4,6 +4,8 @@ Not observed on this server in ~1,500 requests (plain Apache, no rate-limit
 headers), so these tests are the only place the behaviour is exercised.
 """
 
+from datetime import UTC, datetime
+
 import httpx
 import pytest
 
@@ -60,8 +62,11 @@ def test_retry_after_is_parsed_and_capped():
     assert parse_retry_after("5") == 5.0
     assert parse_retry_after(" 2.5 ") == 2.5
     assert parse_retry_after(None) is None
-    # An HTTP-date is legal but unusable here; caller falls back to backoff.
-    assert parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT") is None
+    assert parse_retry_after(
+        "Wed, 21 Oct 2026 07:28:05 GMT",
+        now=datetime(2026, 10, 21, 7, 28, tzinfo=UTC),
+    ) == 5.0
+    assert parse_retry_after("not-a-date") is None
     assert parse_retry_after("99999") == BACKOFF_MAX_SECONDS
     assert parse_retry_after("-5") == 0.0
 

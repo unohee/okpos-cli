@@ -82,6 +82,31 @@ def test_expired_session_triggers_relogin_and_the_call_succeeds(monkeypatch):
     assert client.session is replacement
 
 
+def test_relogin_replays_screen_query_params(monkeypatch):
+    """매장 트리는 TG_INFO 없이 다시 열면 다른 화면으로 해석된다."""
+    seen_params: list[dict[str, str]] = []
+    posts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("SheetAction"):
+            posts["n"] += 1
+            if posts["n"] == 1:
+                return httpx.Response(200, text=LOGIN_PAGE)
+            return httpx.Response(200, text=OK_JSON)
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(200, text=SCREEN_HTML)
+
+    client = OkposClient(_FakeSession(handler), HumanThrottle(1000), _cfg())
+    spec = client.get_screen(_spec().path, {"TG_INFO": "C|01"})
+    seen_params.clear()
+    monkeypatch.setattr(
+        "okpos_cli.client.login", lambda cfg, th: _FakeSession(handler, token="tok-2")
+    )
+
+    assert client.search(spec, 1).ok
+    assert seen_params == [{"TG_INFO": "C|01"}]
+
+
 def test_relogin_clears_cached_screens(monkeypatch):
     """Cached specs carry the dead session's CSRF field and must be dropped."""
     def handler(request: httpx.Request) -> httpx.Response:

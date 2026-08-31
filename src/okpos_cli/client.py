@@ -19,6 +19,8 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -40,16 +42,22 @@ BACKOFF_MAX_SECONDS = 60.0
 MAX_BUSY_RETRIES = 3
 
 
-def parse_retry_after(value: str | None) -> float | None:
+def parse_retry_after(
+    value: str | None, *, now: datetime | None = None
+) -> float | None:
     """Seconds to wait per a Retry-After header, if it gives a usable delay."""
     if not value:
         return None
     try:
         seconds = float(value.strip())
     except ValueError:
-        # The HTTP-date form is allowed but this server sends no such header at
-        # all; treating it as unknown lets the caller fall back to backoff.
-        return None
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = (retry_at - (now or datetime.now(UTC))).total_seconds()
     return max(0.0, min(seconds, BACKOFF_MAX_SECONDS))
 
 

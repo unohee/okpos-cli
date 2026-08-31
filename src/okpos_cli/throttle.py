@@ -2,8 +2,8 @@
 
 Two mechanisms stack:
 
-1. A token bucket enforces the hard ceiling (default 15 req/s). It is the
-   contract with the server and is never skipped.
+1. A sequential minimum interval enforces the hard ceiling (default 15 req/s).
+   It is the contract with the server and is never skipped.
 2. On top of that, a lognormal delay imitates a person clicking through
    screens, with an occasional longer pause as if reading a page. This only
    ever *adds* delay, so it cannot breach the ceiling.
@@ -18,7 +18,7 @@ import numpy as np
 
 
 class HumanThrottle:
-    """Token-bucket rate limiter with lognormal human-like jitter."""
+    """Sequential rate limiter with lognormal human-like jitter."""
 
     def __init__(
         self,

@@ -25,6 +25,11 @@ _SAVENAME_RE = re.compile(r'SaveName\s*:\s*"([^"]+)"')
 _SHEET_RE = re.compile(r"\bmySheet(\d+)\b")
 _TAB_URL_RE = re.compile(r'["\'](/[\w/]+\.jsp)["\']')
 _TABBED_RE = re.compile(r"myTab\d*LoadForm")
+# The shop picker passes an encrypted token to the tree popup; any screen
+# with a shop filter carries one, so the shop list can be sourced from any of them.
+_SHOP_TOKEN_RE = re.compile(
+    r"fnCommSearchPopup4\('매장','\d+','\d+','(\w)','([0-9a-f]+)'"
+)
 
 
 def attr(tag: str, name: str) -> str | None:
@@ -45,6 +50,8 @@ class ScreenSpec:
     columns: list[str] = field(default_factory=list)
     sheet_count: int = 1
     tab_children: list[str] = field(default_factory=list)
+    shop_token: str = ""
+    shop_mode: str = "S"
 
     @property
     def is_tabbed(self) -> bool:
@@ -108,10 +115,13 @@ def parse_screen(path: str, html: str) -> ScreenSpec:
         fields[name] = opt.group(1) if opt else ""
 
     sheets = {int(n) for n in _SHEET_RE.findall(html)}
+    token = _SHOP_TOKEN_RE.search(html)
     return ScreenSpec(
         path=path,
         controller=fields.get("S_CONTROLLER", ""),
         fields=fields,
-        columns=list(dict.fromkeys(_SAVENAME_RE.findall(html))),
+        columns=[c for c in dict.fromkeys(_SAVENAME_RE.findall(html)) if c],
         sheet_count=max(sheets) if sheets else 1,
+        shop_token=token.group(2) if token else "",
+        shop_mode=token.group(1) if token else "S",
     )

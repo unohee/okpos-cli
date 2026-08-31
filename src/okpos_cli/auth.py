@@ -15,6 +15,7 @@ The token from top_frame.jsp is what every later data call must carry.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from dataclasses import dataclass
 
 import httpx
@@ -26,6 +27,24 @@ UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+# The pages declare UTF-8 and responses do come back as UTF-8, but the server
+# decodes *request* bodies as CP949. Sending UTF-8 makes Korean values come
+# home mangled ('전체' -> '??泥?'), so every form body is encoded here instead
+# of relying on the HTTP client's default.
+FORM_CHARSET = "cp949"
+FORM_CONTENT_TYPE = f"application/x-www-form-urlencoded; charset={FORM_CHARSET}"
+
+
+def encode_form(fields: dict[str, str]) -> bytes:
+    """Percent-encode a form body the way this server expects to read it.
+
+    Characters CP949 cannot represent become numeric character references
+    rather than being silently replaced, so nothing is lost without a trace.
+    """
+    return urllib.parse.urlencode(
+        fields, encoding=FORM_CHARSET, errors="xmlcharrefreplace"
+    ).encode("ascii")
 
 _CSRF_RE = re.compile(
     r"<input[^>]*type=['\"]hidden['\"][^>]*"
@@ -82,7 +101,12 @@ def login(cfg: Config, throttle: HumanThrottle | None = None) -> Session:
 
     def _post(path: str, data: dict[str, str], referer: str) -> httpx.Response:
         throttle.wait()
-        return client.post(path, data=data, headers={"Referer": cfg.base_url + referer})
+        return client.post(
+            path,
+            content=encode_form(data),
+            headers={"Referer": cfg.base_url + referer,
+                     "Content-Type": FORM_CONTENT_TYPE},
+        )
 
     try:
         # Hop 1 - the login form issues the first CSRF pair.

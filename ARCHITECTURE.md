@@ -41,8 +41,10 @@ config  throttle  screen        (외부 의존 없음, 순수)
        auth                     (config + throttle)
         ↓
    catalog   client             (auth + screen)
+              ↓
+            shops               (client)
         ↓
-     scraper        db          (client + db)
+     scraper        db          (client + shops + db)
         ↓
        cli          export      (전부)
 ```
@@ -54,6 +56,7 @@ config  throttle  screen        (외부 의존 없음, 순수)
 | `screen.py` | 화면 HTML → 조회 스펙 | 순수 함수. 네트워크를 모른다 |
 | `auth.py` | 3단계 CSRF 릴레이 로그인 | 세션 토큰(`TokenKey`/`TokenVal`) 확보까지 |
 | `catalog.py` | `menuv.jsp` → `Program` 목록 | 수집 대상의 유일한 출처 |
+| `shops.py` | 매장 트리 팝업 → `Shop` 목록 | 매장 코드는 메뉴가 아니라 팝업에 있다 |
 | `client.py` | `SheetAction` / `DataJson` 호출 | 화면 스펙을 캐시 |
 | `db.py` | 스키마 · upsert · 증분 상태 | SQL이 전부 여기 있다 |
 | `scraper.py` | 카탈로그 순회 · 탭 확장 · 날짜 순회 | 오케스트레이션만, HTTP를 직접 안 한다 |
@@ -68,9 +71,10 @@ config  throttle  screen        (외부 의존 없음, 순수)
    탭 확장 결과만 순회한다.
 3. **재실행은 중복이 아니라 갱신이다.** `okpos.record`는
    `(controller, sheet_seq, shop_cd, biz_date, row_no)`가 유니크하고 upsert한다.
-4. **성공은 확인한 것만 보고한다.** 예: `init-db`는 DDL 실행 후 실제 테이블
+4. **폼 본문은 CP949다.** 모든 POST는 `auth.encode_form()`을 거친다. 응답은 UTF-8이다.
+5. **성공은 확인한 것만 보고한다.** 예: `init-db`는 DDL 실행 후 실제 테이블
    목록을 조회해 셋이 다 있을 때만 성공으로 출력한다.
-5. **자격증명은 저장소에 들어가지 않는다.** `.env`는 gitignore이고 `.env.example`만 추적한다.
+6. **자격증명은 저장소에 들어가지 않는다.** `.env`는 gitignore이고 `.env.example`만 추적한다.
 
 ## 데이터 모델
 
@@ -95,11 +99,29 @@ config  throttle  screen        (외부 의존 없음, 순수)
 - **날짜 필드 이름이 제각각.** `date1`, `date1_1`/`date1_2`, `S_DATE`/`E_DATE`,
   `t_SALE_DATE` 등. `ScreenSpec.date_fields`가 값 형태와 이름 패턴으로 추론한다.
 - **월 단위 화면은 날짜 입력이 없다.** 서버 기본값(당월)으로만 조회된다.
+- **`code=-9 미등록 SQL Index`는 대개 내 요청 탓이다.** 서버가 어떤 SQL을 돌릴지
+  고르는 파라미터가 비면 이 코드가 온다. 매장 트리(`shop_group_type_tree`)에서는
+  `ss_SEL_GT`(형태별/그룹별)가 그 역할이고, 이 값을 빠뜨리면 `-9`가 난다.
+  `<select>` 필드를 파싱에서 누락하면 정확히 이 증상이 나온다 — 서버 장애로
+  단정하기 전에 form1 필드를 브라우저와 대조하라.
+- **매장 목록은 메뉴에 없다.** 매장 조건이 있는 화면의 `fnCommSearchPopup4('매장',…)`
+  에 박힌 `TG_INFO` 토큰을 꺼내 트리 팝업을 열어야 나온다 (`shops.py`).
+- **폼 인코딩이 UTF-8이 아니다.** 페이지는 UTF-8을 선언하고 응답도 UTF-8인데
+  **요청 본문만 CP949로 읽는다.** `auth.encode_form()`이 이걸 처리하므로 새 POST
+  경로를 만들 때 `data=`를 직접 쓰지 말고 반드시 그 함수를 거쳐라.
+- **IBSheet 컬럼명이 런타임에 조립되는 곳이 있다.** 매장 트리의
+  `SaveName:"SHOP_"+ss_SEL_GT+"_NM"`가 그렇다. 정적 파싱은 `SHOP_`까지만 보므로
+  `shops._resolve_columns()`가 완성한다. 잘린 이름을 보내면 그 열이 응답에서 빠진다.
+- **트리 응답의 레벨은 `Level`로 판단한다.** `LEVEL_FG`는 매장 행에만 실려 오므로
+  그걸로 분기하면 그룹 행을 놓친다.
 
 ## 알려진 공백
 
 - 세션 자동 갱신이 없다. 장시간 크롤 중 만료되면 이후 조회가 `error`로 기록되고,
   증분 덕에 재실행으로 이어받는다.
+- 매장 축과 날짜 축이 곱해지므로 `--all-shops`로 긴 기간을 돌리면 조회 수가
+  빠르게 커진다 (매장별 화면 44개 × 16매장 × N일). 15 RPS 상한 아래에서
+  1일치가 수 분이다.
 - 병렬 수집을 하지 않는다. `HumanThrottle`은 락을 들고 있어 병렬화에 대비돼
   있으나, 현재 `scraper`는 순차다.
 

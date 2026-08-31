@@ -17,6 +17,7 @@ from .config import load_config
 from .db import Store
 from .export import default_export_name, write_xlsx
 from .scraper import date_range, resolve_targets, scrape
+from .shops import fetch_shops
 from .throttle import HumanThrottle
 
 app = typer.Typer(
@@ -92,6 +93,27 @@ def menu_cmd(
     console.print(table)
 
 
+@app.command("shops")
+def shops_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a table"),
+) -> None:
+    """List the shops this account can see."""
+    _cfg, throttle, session = _connect()
+    client = OkposClient(session, throttle)
+    shops = fetch_shops(client)
+    session.close()
+
+    if as_json:
+        console.print_json(json.dumps([s.__dict__ for s in shops], ensure_ascii=False))
+        return
+    table = Table(title=f"매장 {len(shops)}개")
+    for col in ("코드", "구분", "매장명"):
+        table.add_column(col, overflow="fold")
+    for shop in shops:
+        table.add_row(shop.code, shop.group, shop.clean_name)
+    console.print(table)
+
+
 @app.command("init-db")
 def init_db() -> None:
     """Create the Postgres schema."""
@@ -110,13 +132,19 @@ def scrape_cmd(  # noqa: PLR0913
     date_from: str = typer.Option(..., "--from", help="Start date, YYYY-MM-DD"),
     date_to: str = typer.Option("", "--to", help="End date (defaults to --from)"),
     filter_class: str = typer.Option("", "--class", help="Only this menu class"),
-    shop_cd: str = typer.Option("", "--shop", help="Shop code for shop-scoped screens"),
+    shop_cd: str = typer.Option("", "--shop", help="Single shop code for shop-scoped screens"),
+    all_shops: bool = typer.Option(
+        False, "--all-shops", help="Repeat shop-scoped screens for every visible shop"
+    ),
     full: bool = typer.Option(False, "--full", help="Ignore prior runs and re-scrape"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Resolve screens, do not query"),
     to_db: bool = typer.Option(True, "--to-db/--no-db", help="Persist to Postgres"),
     limit: int = typer.Option(0, "--limit", help="Cap the number of screens (debugging)"),
 ) -> None:
     """Crawl every program in the catalogue for the given date range."""
+    if shop_cd and all_shops:
+        raise typer.BadParameter("--shop과 --all-shops는 함께 쓸 수 없습니다")
+
     start = _parse_day(date_from)
     end = _parse_day(date_to) if date_to else start
     days = date_range(start, end)
@@ -139,11 +167,32 @@ def scrape_cmd(  # noqa: PLR0913
     elif to_db:
         console.print("[yellow]OKPOS_PG_DSN 미설정 — DB 적재를 건너뜁니다[/]")
 
+    shop_codes: list[str] = []
+    if all_shops:
+        with console.status("[cyan]매장 목록을 가져오는 중..."):
+            shops = fetch_shops(client)
+        shop_codes = [s.code for s in shops]
+        if not shop_codes:
+            session.close()
+            console.print(
+                "[red]--all-shops를 요청했으나 조회된 매장이 0개입니다.[/] "
+                "기본 범위로 조용히 넘어가지 않고 중단합니다."
+            )
+            raise typer.Exit(1)
+        console.print(f"매장 [bold]{len(shop_codes)}[/]개를 순회합니다")
+
     with console.status(f"[cyan]{len(programs)}개 프로그램의 조회 화면을 해석하는 중..."):
         targets = resolve_targets(client, programs, progress=console.print)
     if limit:
         targets = targets[:limit]
-    console.print(f"조회 가능한 화면 [bold]{len(targets)}[/]개 · 대상 날짜 {len(days)}일")
+    shop_scoped = sum(1 for t in targets if t.spec.needs_shop)
+    console.print(
+        f"조회 가능한 화면 [bold]{len(targets)}[/]개"
+        f" (매장별 {shop_scoped}개) · 대상 날짜 {len(days)}일"
+    )
+    if shop_codes:
+        planned = (len(targets) - shop_scoped) + shop_scoped * len(shop_codes)
+        console.print(f"예상 조회 조합: 약 [bold]{planned * len(days):,}[/]건")
 
     if dry_run:
         table = Table(title="조회 대상 (dry-run)")
@@ -161,7 +210,7 @@ def scrape_cmd(  # noqa: PLR0913
 
     stats = scrape(
         client, targets, days, store=store, incremental=not full,
-        shop_cd=shop_cd, progress=console.print,
+        shop_cd=shop_cd, shops=shop_codes or None, progress=console.print,
     )
     session.close()
 

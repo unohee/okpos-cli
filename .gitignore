@@ -12,9 +12,15 @@ build/
 dist/
 
 # Tooling
+.coverage
+.coverage.*
+htmlcov/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Tool output
+.openswarm/
 
 # Runtime artifacts
 exports/*.xlsx

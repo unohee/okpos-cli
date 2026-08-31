@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from .auth import Session
+from .auth import FORM_CONTENT_TYPE, Session, encode_form
 from .screen import ScreenSpec, parse_screen
 from .throttle import HumanThrottle
 
@@ -62,8 +62,9 @@ class OkposClient:
         self.throttle.wait()
         return self.session.client.post(
             path,
-            data=data,
-            headers={"Referer": str(self.session.client.base_url) + referer},
+            content=encode_form(data),
+            headers={"Referer": str(self.session.client.base_url) + referer,
+                     "Content-Type": FORM_CONTENT_TYPE},
         )
 
     def get_screen(self, path: str, params: dict[str, str] | None = None) -> ScreenSpec:

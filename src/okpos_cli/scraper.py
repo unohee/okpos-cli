@@ -88,7 +88,29 @@ def resolve_targets(
     return targets
 
 
-def scrape(
+def _persist_failure(
+    store: Store | None, spec: ScreenSpec, seq: int, scope: str, biz_date: date, message: str
+) -> None:
+    if store:
+        store.mark_run(
+            controller=spec.controller, sheet_seq=seq, shop_cd=scope,
+            biz_date=biz_date, screen_path=spec.path, row_count=0,
+            status="error", message=message,
+        )
+
+
+def _scopes_for(spec: ScreenSpec, shops: list[str] | None, shop_cd: str) -> list[str]:
+    """Which shop codes to repeat this screen for.
+
+    Only shop-scoped screens are worth repeating; the rest would return the
+    same rows once per shop.
+    """
+    if not spec.needs_shop:
+        return [""]
+    return shops if shops else [shop_cd]
+
+
+def scrape(  # noqa: PLR0913
     client: OkposClient,
     targets: list[Target],
     dates: list[date],
@@ -96,68 +118,103 @@ def scrape(
     store: Store | None = None,
     incremental: bool = True,
     shop_cd: str = "",
+    shops: list[str] | None = None,
     progress: Progress | None = None,
     sink: Callable[[Target, int, date, list[dict[str, Any]]], None] | None = None,
 ) -> ScrapeStats:
-    """Search every target for every date, persisting through `store`/`sink`."""
+    """Search every target across every shop scope and date, persisting results."""
     stats = ScrapeStats(screens=len(targets))
-    done = store.completed_keys(dates) if (store and incremental) else set()
+    use_state = bool(store and incremental)
+    done = store.completed_keys(dates) if use_state else set()
+    # Shop-agnostic screens are matched without shop_cd; see completed_any_scope.
+    done_any = store.completed_any_scope(dates) if use_state else set()
 
     for target in targets:
         spec = target.spec
-        for biz_date in dates:
-            iso = biz_date.isoformat()
-            overrides = {f: iso for f in spec.date_fields}
-            if shop_cd and spec.needs_shop:
-                overrides["ss_SHOP_CD"] = shop_cd
-
-            for seq in range(1, spec.sheet_count + 1):
-                key = (spec.controller, seq, shop_cd, biz_date)
-                if key in done:
-                    stats.skipped += 1
-                    continue
-                try:
-                    result = client.search(spec, seq, overrides)
-                except Exception as exc:  # noqa: BLE001 - one bad sheet must not stop the crawl
-                    stats.failures.append((f"{spec.controller}#{seq}@{iso}", str(exc)))
-                    if store:
-                        store.mark_run(
-                            controller=spec.controller, sheet_seq=seq, shop_cd=shop_cd,
-                            biz_date=biz_date, screen_path=spec.path, row_count=0,
-                            status="error", message=str(exc),
-                        )
-                    continue
-
-                stats.searches += 1
-                if not result.ok:
-                    stats.failures.append(
-                        (f"{spec.controller}#{seq}@{iso}", f"code={result.code} {result.message}")
-                    )
-                    if store:
-                        store.mark_run(
-                            controller=spec.controller, sheet_seq=seq, shop_cd=shop_cd,
-                            biz_date=biz_date, screen_path=spec.path, row_count=0,
-                            status="error", message=result.message,
-                        )
-                    continue
-
-                stats.rows += len(result.rows)
-                if store:
-                    store.save_rows(
-                        program_cd=target.program.code, controller=spec.controller,
-                        screen_path=spec.path, sheet_seq=seq, shop_cd=shop_cd,
-                        biz_date=biz_date, rows=result.rows,
-                    )
-                    store.mark_run(
-                        controller=spec.controller, sheet_seq=seq, shop_cd=shop_cd,
-                        biz_date=biz_date, screen_path=spec.path,
-                        row_count=len(result.rows), status="ok",
-                    )
-                if sink:
-                    sink(target, seq, biz_date, result.rows)
-                if progress and result.rows:
-                    progress(
-                        f"[green]{len(result.rows):>5}[/] rows  "
-                        f"{target.program.name} #{seq} @ {iso}"
-                    )
+        for scope in _scopes_for(spec, shops, shop_cd):
+            for biz_date in dates:
+                overrides = {f: biz_date.isoformat() for f in spec.date_fields}
+                if scope:
+                    overrides["ss_SHOP_CD"] = scope
+                _search_sheets(
+                    client, target, scope, biz_date, overrides,
+                    store=store, done=done, done_any=done_any,
+                    stats=stats, progress=progress, sink=sink,
+                )
     return stats
+
+
+def _already_done(  # noqa: PLR0913
+    spec: ScreenSpec,
+    seq: int,
+    scope: str,
+    biz_date: date,
+    done: set[tuple[str, int, str, date]],
+    done_any: set[tuple[str, int, date]],
+) -> bool:
+    """Whether this sheet was already collected.
+
+    Shop-scoped screens are keyed by shop; shop-agnostic ones are not, so a run
+    recorded under any scope (including an older `--shop` run) counts as done.
+    """
+    if spec.needs_shop:
+        return (spec.controller, seq, scope, biz_date) in done
+    return (spec.controller, seq, biz_date) in done_any
+
+
+def _search_sheets(  # noqa: PLR0913
+    client: OkposClient,
+    target: Target,
+    scope: str,
+    biz_date: date,
+    overrides: dict[str, str],
+    *,
+    store: Store | None,
+    done: set[tuple[str, int, str, date]],
+    done_any: set[tuple[str, int, date]],
+    stats: ScrapeStats,
+    progress: Progress | None,
+    sink: Callable[[Target, int, date, list[dict[str, Any]]], None] | None,
+) -> None:
+    """Run every sheet of one screen for one (shop, date) combination."""
+    spec = target.spec
+    iso = biz_date.isoformat()
+    for seq in range(1, spec.sheet_count + 1):
+        if _already_done(spec, seq, scope, biz_date, done, done_any):
+            stats.skipped += 1
+            continue
+        try:
+            result = client.search(spec, seq, overrides)
+        except Exception as exc:  # noqa: BLE001 - one bad sheet must not stop the crawl
+            stats.failures.append((f"{spec.controller}#{seq}@{iso}", str(exc)))
+            _persist_failure(store, spec, seq, scope, biz_date, str(exc))
+            continue
+
+        stats.searches += 1
+        if not result.ok:
+            stats.failures.append(
+                (f"{spec.controller}#{seq}@{iso}", f"code={result.code} {result.message}")
+            )
+            _persist_failure(store, spec, seq, scope, biz_date, result.message)
+            continue
+
+        stats.rows += len(result.rows)
+        if store:
+            store.save_rows(
+                program_cd=target.program.code, controller=spec.controller,
+                screen_path=spec.path, sheet_seq=seq, shop_cd=scope,
+                biz_date=biz_date, rows=result.rows,
+            )
+            store.mark_run(
+                controller=spec.controller, sheet_seq=seq, shop_cd=scope,
+                biz_date=biz_date, screen_path=spec.path,
+                row_count=len(result.rows), status="ok",
+            )
+        if sink:
+            sink(target, seq, biz_date, result.rows)
+        if progress and result.rows:
+            label = f" [{scope}]" if scope else ""
+            progress(
+                f"[green]{len(result.rows):>5}[/] rows  "
+                f"{target.program.name} #{seq}{label} @ {iso}"
+            )

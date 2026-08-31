@@ -197,6 +197,27 @@ class Store:
             ).fetchall()
         return {(r["controller"], r["sheet_seq"], r["shop_cd"], r["biz_date"]) for r in rows}
 
+    def completed_any_scope(self, biz_dates: list[date]) -> set[tuple[str, int, date]]:
+        """Keys done under *any* shop scope.
+
+        Shop-agnostic screens return the same rows whatever `shop_cd` was in
+        effect, and versions before shop iteration stored them under the global
+        `--shop` code. Matching those on `shop_cd` would re-scrape and duplicate
+        them, so they are matched without it.
+        """
+        if not biz_dates:
+            return set()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT controller, sheet_seq, biz_date
+                FROM okpos.scrape_run
+                WHERE status = 'ok' AND biz_date = ANY(%s)
+                """,
+                (biz_dates,),
+            ).fetchall()
+        return {(r["controller"], r["sheet_seq"], r["biz_date"]) for r in rows}
+
     def fetch_records(
         self,
         *,

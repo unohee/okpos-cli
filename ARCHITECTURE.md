@@ -57,7 +57,7 @@ config  throttle  screen        (외부 의존 없음, 순수)
 | `auth.py` | 3단계 CSRF 릴레이 로그인 | 세션 토큰(`TokenKey`/`TokenVal`) 확보까지 |
 | `catalog.py` | `menuv.jsp` → `Program` 목록 | 수집 대상의 유일한 출처 |
 | `shops.py` | 매장 트리 팝업 → `Shop` 목록 | 매장 코드는 메뉴가 아니라 팝업에 있다 |
-| `client.py` | `SheetAction` / `DataJson` 호출 | 화면 스펙을 캐시 |
+| `client.py` | `SheetAction` / `DataJson` 호출 | 화면 스펙 캐시 + 세션 만료 시 재로그인 |
 | `db.py` | 스키마 · upsert · 증분 상태 | SQL이 전부 여기 있다 |
 | `scraper.py` | 카탈로그 순회 · 탭 확장 · 날짜 순회 | 오케스트레이션만, HTTP를 직접 안 한다 |
 | `export.py` | JSONB → 컨트롤러별 시트 | 순수 함수 |
@@ -67,14 +67,19 @@ config  throttle  screen        (외부 의존 없음, 순수)
 
 1. **RPS 상한은 협상 대상이 아니다.** 모든 HTTP 호출은 `throttle.wait()`를 지난다.
    `auth`·`catalog`·`client` 어디서든 예외 없다. 지터는 상한을 낮추기만 한다.
+   페이싱은 토큰 버킷이 아니라 **순차 최소 간격**이라 버스트가 나오지 않는다.
+   실측 지속 페이스는 약 3.3 RPS이고 상한에 걸리는 요청은 3.4%뿐이다.
 2. **수집 대상은 서버가 정한다.** 화면 경로를 코드에 적지 않는다. 카탈로그와
    탭 확장 결과만 순회한다.
 3. **재실행은 중복이 아니라 갱신이다.** `okpos.record`는
    `(controller, sheet_seq, shop_cd, biz_date, row_no)`가 유니크하고 upsert한다.
-4. **폼 본문은 CP949다.** 모든 POST는 `auth.encode_form()`을 거친다. 응답은 UTF-8이다.
-5. **성공은 확인한 것만 보고한다.** 예: `init-db`는 DDL 실행 후 실제 테이블
+4. **재로그인은 캐시를 비운다.** 화면 스펙에 세션 CSRF 토큰이 들어 있으므로,
+   `OkposClient.relogin()`은 반드시 `_screens`를 비운다. 안 그러면 낡은 토큰을
+   보내 원인을 알기 어려운 실패가 난다.
+5. **폼 본문은 CP949다.** 모든 POST는 `auth.encode_form()`을 거친다. 응답은 UTF-8이다.
+6. **성공은 확인한 것만 보고한다.** 예: `init-db`는 DDL 실행 후 실제 테이블
    목록을 조회해 셋이 다 있을 때만 성공으로 출력한다.
-6. **자격증명은 저장소에 들어가지 않는다.** `.env`는 gitignore이고 `.env.example`만 추적한다.
+7. **자격증명은 저장소에 들어가지 않는다.** `.env`는 gitignore이고 `.env.example`만 추적한다.
 
 ## 데이터 모델
 
@@ -98,6 +103,11 @@ config  throttle  screen        (외부 의존 없음, 순수)
 - **한 화면에 시트가 여러 개.** `SHEETSEQ` 1..N을 다 돌아야 데이터를 다 얻는다.
 - **날짜 필드 이름이 제각각.** `date1`, `date1_1`/`date1_2`, `S_DATE`/`E_DATE`,
   `t_SALE_DATE` 등. `ScreenSpec.date_fields`가 값 형태와 이름 패턴으로 추론한다.
+- **429는 이 서버에서 관측된 적이 없다.** 약 1,500회 동안 `200`과 `404`뿐이었고
+  rate-limit 헤더도 없다. `client`의 백오프는 대비이지 실측 기반이 아니며,
+  **조용한 차단(연결 거부·타임아웃)은 아직 다뤄지지 않는다.**
+- **세션이 끊기면 JSON 대신 로그인 페이지가 온다.** JSON 파싱 실패로 나타나므로
+  파싱 오류와 세션 만료를 구분해야 한다 (`looks_like_login_page`).
 - **월 단위 화면은 날짜 입력이 없다.** 서버 기본값(당월)으로만 조회된다.
 - **`code=-9 미등록 SQL Index`는 대개 내 요청 탓이다.** 서버가 어떤 SQL을 돌릴지
   고르는 파라미터가 비면 이 코드가 온다. 매장 트리(`shop_group_type_tree`)에서는
@@ -117,8 +127,6 @@ config  throttle  screen        (외부 의존 없음, 순수)
 
 ## 알려진 공백
 
-- 세션 자동 갱신이 없다. 장시간 크롤 중 만료되면 이후 조회가 `error`로 기록되고,
-  증분 덕에 재실행으로 이어받는다.
 - 매장 축과 날짜 축이 곱해지므로 `--all-shops`로 긴 기간을 돌리면 조회 수가
   빠르게 커진다 (매장별 화면 44개 × 16매장 × N일). 15 RPS 상한 아래에서
   1일치가 수 분이다.

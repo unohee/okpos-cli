@@ -19,6 +19,9 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
+# Exported conversation transcripts (contain sales and shop data)
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9]*.txt
+
 # Tool output
 .openswarm/
 

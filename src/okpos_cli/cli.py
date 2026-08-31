@@ -34,6 +34,23 @@ def _parse_day(value: str) -> date:
         raise typer.BadParameter(f"expected YYYY-MM-DD, got {value!r}") from exc
 
 
+def summarize_failures(
+    failures: list[tuple[str, str]], limit: int = 10
+) -> list[tuple[str, str, int]]:
+    """Collapse failures that share a cause into one line each.
+
+    A screen that fails once usually fails for every shop and every date, so a
+    30-day x 16-shop run would otherwise print the same message hundreds of
+    times. Returns (screen, message, count) ordered by count.
+    """
+    grouped: dict[tuple[str, str], int] = {}
+    for name, msg in failures:
+        key = (name.split("@")[0], msg[:90])
+        grouped[key] = grouped.get(key, 0) + 1
+    ranked = sorted(grouped.items(), key=lambda kv: (-kv[1], kv[0][0]))
+    return [(name, msg, count) for (name, msg), count in ranked[:limit]]
+
+
 def _connect(seed: int | None = None):
     cfg = load_config()
     throttle = HumanThrottle(cfg.max_rps, seed=seed)
@@ -98,10 +115,10 @@ def shops_cmd(
     as_json: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a table"),
 ) -> None:
     """List the shops this account can see."""
-    _cfg, throttle, session = _connect()
-    client = OkposClient(session, throttle)
+    cfg, throttle, session = _connect()
+    client = OkposClient(session, throttle, cfg)
     shops = fetch_shops(client)
-    session.close()
+    client.session.close()
 
     if as_json:
         console.print_json(json.dumps([s.__dict__ for s in shops], ensure_ascii=False))
@@ -150,7 +167,7 @@ def scrape_cmd(  # noqa: PLR0913
     days = date_range(start, end)
 
     cfg, throttle, session = _connect()
-    client = OkposClient(session, throttle)
+    client = OkposClient(session, throttle, cfg)
     programs = fetch_catalog(session, throttle)
     if filter_class:
         needle = filter_class.lower()
@@ -173,7 +190,8 @@ def scrape_cmd(  # noqa: PLR0913
             shops = fetch_shops(client)
         shop_codes = [s.code for s in shops]
         if not shop_codes:
-            session.close()
+            # fetch_shops may have re-logged in; close whatever is live now.
+            client.session.close()
             console.print(
                 "[red]--all-shops를 요청했으나 조회된 매장이 0개입니다.[/] "
                 "기본 범위로 조용히 넘어가지 않고 중단합니다."
@@ -205,14 +223,15 @@ def scrape_cmd(  # noqa: PLR0913
                 "Y" if t.spec.needs_shop else "-", str(len(t.spec.columns)),
             )
         console.print(table)
-        session.close()
+        client.session.close()
         return
 
     stats = scrape(
         client, targets, days, store=store, incremental=not full,
         shop_cd=shop_cd, shops=shop_codes or None, progress=console.print,
     )
-    session.close()
+    # `session` may have been replaced by a re-login; close the live one.
+    client.session.close()
 
     console.print()
     console.print(
@@ -220,8 +239,9 @@ def scrape_cmd(  # noqa: PLR0913
         f"행 {stats.rows} · 스킵 {stats.skipped} · 실패 {len(stats.failures)}"
     )
     console.print(f"실측 피크 {throttle.observed_peak_rps():.0f} RPS (상한 {cfg.max_rps})")
-    for name, msg in stats.failures[:10]:
-        console.print(f"  [red]![/] {name}: {msg[:110]}")
+    for name, msg, count in summarize_failures(stats.failures):
+        times = f" ×{count}" if count > 1 else ""
+        console.print(f"  [red]![/] {name}{times}: {msg}")
 
 
 @app.command("export")

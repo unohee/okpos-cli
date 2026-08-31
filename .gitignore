@@ -1,0 +1,23 @@
+# Secrets
+.env
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime artifacts
+exports/*.xlsx
+*.log
+.okpos_session.json
+trash/

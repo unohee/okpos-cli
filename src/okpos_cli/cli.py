@@ -51,6 +51,20 @@ def summarize_failures(
     return [(name, msg, count) for (name, msg), count in ranked[:limit]]
 
 
+def summarize_adaptive_throttle(throttle: HumanThrottle) -> str | None:
+    """Human-readable latency/adaptive pacing state after a crawl."""
+    baseline = throttle.latency_baseline_seconds
+    ewma = throttle.latency_ewma_seconds
+    if baseline is None or ewma is None:
+        return None
+    return (
+        f"응답시간 기준선 {baseline:.3f}초 · EWMA {ewma:.3f}초 ({ewma / baseline:.1f}×) · "
+        f"적응 감속 {throttle.adaptive_events}회 "
+        f"(현재 +{throttle.adaptive_delay_seconds:.2f}초, "
+        f"최대 +{throttle.max_adaptive_delay_seconds:.2f}초)"
+    )
+
+
 def _connect(seed: int | None = None):
     cfg = load_config()
     throttle = HumanThrottle(cfg.max_rps, seed=seed)
@@ -239,6 +253,9 @@ def scrape_cmd(  # noqa: PLR0913
         f"행 {stats.rows} · 스킵 {stats.skipped} · 실패 {len(stats.failures)}"
     )
     console.print(f"실측 피크 {throttle.observed_peak_rps():.0f} RPS (상한 {cfg.max_rps})")
+    adaptive_summary = summarize_adaptive_throttle(throttle)
+    if adaptive_summary:
+        console.print(adaptive_summary)
     for name, msg, count in summarize_failures(stats.failures):
         times = f" ×{count}" if count > 1 else ""
         console.print(f"  [red]![/] {name}{times}: {msg}")

@@ -96,16 +96,20 @@ def login(cfg: Config, throttle: HumanThrottle | None = None) -> Session:
     )
 
     def _get(path: str, referer: str) -> httpx.Response:
-        throttle.wait()
-        return client.get(path, headers={"Referer": cfg.base_url + referer})
+        return throttle.run_request(
+            lambda: client.get(path, headers={"Referer": cfg.base_url + referer})
+        )
 
     def _post(path: str, data: dict[str, str], referer: str) -> httpx.Response:
-        throttle.wait()
-        return client.post(
-            path,
-            content=encode_form(data),
-            headers={"Referer": cfg.base_url + referer,
-                     "Content-Type": FORM_CONTENT_TYPE},
+        return throttle.run_request(
+            lambda: client.post(
+                path,
+                content=encode_form(data),
+                headers={
+                    "Referer": cfg.base_url + referer,
+                    "Content-Type": FORM_CONTENT_TYPE,
+                },
+            )
         )
 
     try:

@@ -48,10 +48,11 @@ class Program:
 
 def fetch_catalog(session: Session, throttle: HumanThrottle) -> list[Program]:
     """Download and parse the full program menu."""
-    throttle.wait()
-    resp = session.client.get(
-        "/login/menuv.jsp",
-        headers={"Referer": str(session.client.base_url) + "/login/top_frame.jsp"},
+    resp = throttle.run_request(
+        lambda: session.client.get(
+            "/login/menuv.jsp",
+            headers={"Referer": str(session.client.base_url) + "/login/top_frame.jsp"},
+        )
     )
     resp.raise_for_status()
     m = _AL_RE.search(resp.text)

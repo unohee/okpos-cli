@@ -1,6 +1,7 @@
 """Failure reporting: one line per cause, not per occurrence."""
 
-from okpos_cli.cli import summarize_failures
+from okpos_cli.cli import summarize_adaptive_throttle, summarize_failures
+from okpos_cli.throttle import HumanThrottle
 
 
 def test_same_cause_across_shops_collapses_to_one_line():
@@ -45,3 +46,18 @@ def test_limit_caps_the_output():
 
 def test_no_failures_yields_nothing():
     assert summarize_failures([]) == []
+
+
+def test_adaptive_throttle_summary_reports_measured_state():
+    throttle = HumanThrottle(max_rps=15)
+    assert summarize_adaptive_throttle(throttle) is None
+
+    for _ in range(10):
+        throttle.observe_latency(0.2)
+    for _ in range(2):
+        throttle.observe_latency(2.0)
+
+    summary = summarize_adaptive_throttle(throttle)
+    assert summary is not None
+    assert "기준선 0.200초" in summary
+    assert "적응 감속 1회" in summary

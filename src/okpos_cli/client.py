@@ -157,8 +157,7 @@ class OkposClient:
     def _send(self, build: Callable[[], httpx.Response], what: str) -> httpx.Response:
         """Issue a request, backing off while the server says it is busy."""
         for attempt in range(MAX_BUSY_RETRIES + 1):
-            self.throttle.wait()
-            resp = build()
+            resp = self.throttle.run_request(build)
             if resp.status_code not in BUSY_STATUSES:
                 return resp
             if attempt == MAX_BUSY_RETRIES:

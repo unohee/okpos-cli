@@ -75,7 +75,7 @@ class Store:
     dsn: str
 
     @contextmanager
-    def connect(self) -> Iterator[psycopg.Connection]:
+    def connect(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
         with psycopg.connect(self.dsn, row_factory=dict_row) as conn:
             yield conn
 

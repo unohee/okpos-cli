@@ -9,15 +9,15 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from okpos_cli.client import (
-    BACKOFF_MAX_SECONDS,
-    MAX_BUSY_RETRIES,
-    OkposClient,
-    ServerBusy,
-    parse_retry_after,
-)
+from okpos_cli.client import OkposClient
+from okpos_cli.safety import ServerBusy
 from okpos_cli.screen import ScreenSpec
 from okpos_cli.throttle import HumanThrottle
+from okpos_cli.transport import (
+    BACKOFF_MAX_SECONDS,
+    MAX_BUSY_RETRIES,
+    parse_retry_after,
+)
 
 SCREEN_HTML = """<form id='form1'>
 <input type='hidden' name='S_CONTROLLER' value='sale.sale.x010'>
@@ -54,7 +54,7 @@ def _client(handler, monkeypatch):
     """
     slept: list[float] = []
     monkeypatch.setattr(HumanThrottle, "wait", lambda self: None)
-    monkeypatch.setattr("okpos_cli.client.time.sleep", slept.append)
+    monkeypatch.setattr("okpos_cli.transport.time.sleep", slept.append)
     return OkposClient(_FakeSession(handler), HumanThrottle(1000)), slept
 
 

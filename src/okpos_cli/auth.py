@@ -21,7 +21,9 @@ from dataclasses import dataclass
 import httpx
 
 from .config import Config
+from .safety import AuthenticationUnavailable, SafetyStop
 from .throttle import HumanThrottle
+from .transport import paced_request
 
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -57,7 +59,7 @@ _TOKEN_VAL_RE = re.compile(r"id=['\"]TokenVal['\"][^>]*value=['\"]([^'\"]+)['\"]
 _LOGIN_OK_RE = re.compile(r"top_frame\.jsp")
 
 
-class LoginError(RuntimeError):
+class LoginError(SafetyStop):
     """Raised when the credential relay does not end in an authenticated session."""
 
 
@@ -92,37 +94,49 @@ def login(cfg: Config, throttle: HumanThrottle | None = None) -> Session:
         base_url=cfg.base_url,
         headers={"User-Agent": UA},
         timeout=60.0,
-        follow_redirects=True,
+        # Redirect hops are followed explicitly so each one is paced/countable.
+        follow_redirects=False,
     )
 
     def _get(path: str, referer: str) -> httpx.Response:
-        return throttle.run_request(
-            lambda: client.get(path, headers={"Referer": cfg.base_url + referer})
+        return paced_request(
+            client,
+            throttle,
+            "GET",
+            path,
+            headers={"Referer": cfg.base_url + referer},
         )
 
     def _post(path: str, data: dict[str, str], referer: str) -> httpx.Response:
-        return throttle.run_request(
-            lambda: client.post(
-                path,
-                content=encode_form(data),
-                headers={
-                    "Referer": cfg.base_url + referer,
-                    "Content-Type": FORM_CONTENT_TYPE,
-                },
-            )
+        return paced_request(
+            client,
+            throttle,
+            "POST",
+            path,
+            content=encode_form(data),
+            headers={
+                "Referer": cfg.base_url + referer,
+                "Content-Type": FORM_CONTENT_TYPE,
+            },
         )
+
+    def _require_login_response(response: httpx.Response, what: str) -> None:
+        if response.status_code >= 400:
+            raise AuthenticationUnavailable(
+                f"{what}: server returned HTTP {response.status_code}"
+            )
 
     try:
         # Hop 1 - the login form issues the first CSRF pair.
         form = _get(cfg.login_path, cfg.login_path)
-        form.raise_for_status()
+        _require_login_response(form, "login form")
         key, val = _extract_csrf(form.text)
 
         creds = {"AutoFg": "W", "user_id": cfg.user_id, "user_pwd": cfg.password}
 
         # Hop 2 - returns a relay form carrying a *new* CSRF pair.
         check = _post("/login/login_check.jsp", {key: val, **creds}, cfg.login_path)
-        check.raise_for_status()
+        _require_login_response(check, "login check")
         key2, val2 = _extract_csrf(check.text)
 
         # Hop 3 - establishes the session cookie.
@@ -131,7 +145,7 @@ def login(cfg: Config, throttle: HumanThrottle | None = None) -> Session:
             {key2: val2, **creds},
             "/login/login_check.jsp",
         )
-        action.raise_for_status()
+        _require_login_response(action, "login action")
         if not _LOGIN_OK_RE.search(action.text):
             raise LoginError(
                 "Login rejected - check OKPOS_ID / OKPOS_PW "
@@ -140,7 +154,7 @@ def login(cfg: Config, throttle: HumanThrottle | None = None) -> Session:
 
         # Hop 4 - the session-wide token used by every data call.
         top = _get("/login/top_frame.jsp", "/login/login_check_action.jsp")
-        top.raise_for_status()
+        _require_login_response(top, "top frame")
         tk, tv = _TOKEN_KEY_RE.search(top.text), _TOKEN_VAL_RE.search(top.text)
         if not tk or not tv:
             raise LoginError("Session token (TokenKey/TokenVal) missing from top_frame.jsp")
@@ -152,6 +166,14 @@ def login(cfg: Config, throttle: HumanThrottle | None = None) -> Session:
             token_val=tv.group(1),
             company=(title.group(1).strip() if title else "unknown"),
         )
+    except SafetyStop:
+        client.close()
+        raise
+    except httpx.TransportError as exc:
+        client.close()
+        raise AuthenticationUnavailable(
+            f"login transport failed: {type(exc).__name__}: {exc}"
+        ) from exc
     except Exception:
         client.close()
         raise

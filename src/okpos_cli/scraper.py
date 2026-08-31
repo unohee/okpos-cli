@@ -16,6 +16,7 @@ from typing import Any
 from .catalog import Program
 from .client import OkposClient
 from .db import Store
+from .safety import SafetyStop
 from .screen import ScreenSpec
 
 Progress = Callable[[str], None]
@@ -64,6 +65,8 @@ def resolve_targets(
     for prog in programs:
         try:
             spec = client.get_screen(prog.screen_path, prog.query_params)
+        except SafetyStop:
+            raise
         except Exception as exc:  # noqa: BLE001 - one bad screen must not stop the crawl
             if progress:
                 progress(f"[yellow]skip[/] {prog.screen_path}: {type(exc).__name__}")
@@ -75,6 +78,8 @@ def resolve_targets(
                     continue
                 try:
                     child_spec = client.get_screen(child)
+                except SafetyStop:
+                    raise
                 except Exception:  # noqa: BLE001
                     continue
                 if child_spec.queryable:
@@ -185,6 +190,8 @@ def _search_sheets(  # noqa: PLR0913
             continue
         try:
             result = client.search(spec, seq, overrides)
+        except SafetyStop:
+            raise
         except Exception as exc:  # noqa: BLE001 - one bad sheet must not stop the crawl
             stats.failures.append((f"{spec.controller}#{seq}@{iso}", str(exc)))
             _persist_failure(store, spec, seq, scope, biz_date, str(exc))

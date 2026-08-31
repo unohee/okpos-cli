@@ -22,6 +22,8 @@ from typing import TypeVar
 
 import numpy as np
 
+from .safety import RequestBudgetExceeded
+
 ADAPTIVE_WARMUP_SAMPLES = 10
 ADAPTIVE_EWMA_ALPHA = 0.2
 ADAPTIVE_SLOW_RATIO = 3.0
@@ -29,6 +31,7 @@ ADAPTIVE_RECOVER_RATIO = 1.5
 ADAPTIVE_RECOVERY_FACTOR = 0.8
 ADAPTIVE_MAX_DELAY_SECONDS = 5.0
 ADAPTIVE_MIN_DELAY_SECONDS = 0.01
+ADAPTIVE_BASELINE_CEILING_SECONDS = 0.3
 
 _ResultT = TypeVar("_ResultT")
 
@@ -44,11 +47,15 @@ class HumanThrottle:
         jitter_sigma: float = 0.55,
         pause_probability: float = 0.04,
         pause_range: tuple[float, float] = (1.2, 3.5),
+        max_requests: int | None = None,
         seed: int | None = None,
     ) -> None:
         if max_rps <= 0:
             raise ValueError("max_rps must be positive")
+        if max_requests is not None and max_requests <= 0:
+            raise ValueError("max_requests must be positive")
         self.max_rps = max_rps
+        self.max_requests = max_requests
         self._min_interval = 1.0 / max_rps
         self._jitter_mu = float(np.log(jitter_median))
         self._jitter_sigma = jitter_sigma
@@ -59,6 +66,7 @@ class HumanThrottle:
         self._lock = threading.Lock()
         self._next_allowed = 0.0
         self.request_times: list[float] = []
+        self.request_count = 0
         self._warmup_latencies: list[float] = []
         self.response_count = 0
         self.latency_baseline_seconds: float | None = None
@@ -79,6 +87,11 @@ class HumanThrottle:
     def wait(self) -> None:
         """Block until the next request is allowed to go out."""
         with self._lock:
+            if self.max_requests is not None and self.request_count >= self.max_requests:
+                raise RequestBudgetExceeded(
+                    f"HTTP request budget exhausted ({self.request_count}/{self.max_requests})"
+                )
+            self.request_count += 1
             now = time.monotonic()
             start = max(now, self._next_allowed)
             delay = self._draw_delay()
@@ -121,7 +134,9 @@ class HumanThrottle:
                 baseline = statistics.median(self._warmup_latencies)
                 # Monotonic clocks can yield zero in mocked or extremely fast
                 # calls; a tiny floor keeps the ratio defined.
-                self.latency_baseline_seconds = max(baseline, 1e-6)
+                self.latency_baseline_seconds = min(
+                    max(baseline, 1e-6), ADAPTIVE_BASELINE_CEILING_SECONDS
+                )
                 self.latency_ewma_seconds = self.latency_baseline_seconds
                 return
 

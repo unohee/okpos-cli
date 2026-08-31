@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from okpos_cli.safety import RequestBudgetExceeded
 from okpos_cli.throttle import HumanThrottle
 
 
@@ -38,6 +39,24 @@ def test_rejects_non_positive_rate():
     raise AssertionError("expected ValueError for max_rps=0")
 
 
+def test_request_budget_is_a_hard_ceiling(monkeypatch):
+    throttle = HumanThrottle(max_rps=15, max_requests=2)
+    monkeypatch.setattr(throttle, "_draw_delay", lambda: 0.0)
+    monkeypatch.setattr("okpos_cli.throttle.time.sleep", lambda _seconds: None)
+
+    throttle.wait()
+    throttle.wait()
+    with pytest.raises(RequestBudgetExceeded, match="2/2"):
+        throttle.wait()
+
+    assert throttle.request_count == 2
+
+
+def test_rejects_non_positive_request_budget():
+    with pytest.raises(ValueError, match="max_requests"):
+        HumanThrottle(max_requests=0)
+
+
 def test_latency_baseline_uses_warmup_median():
     throttle = HumanThrottle(max_rps=15)
     for latency in [0.18] * 9 + [1.8]:
@@ -47,6 +66,19 @@ def test_latency_baseline_uses_warmup_median():
     assert throttle.latency_baseline_seconds == pytest.approx(0.18)
     assert throttle.latency_ewma_seconds == pytest.approx(0.18)
     assert throttle.adaptive_delay_seconds == 0.0
+
+
+def test_slow_warmup_cannot_normalize_an_overloaded_server():
+    throttle = HumanThrottle(max_rps=15)
+    for _ in range(10):
+        throttle.observe_latency(1.0)
+
+    assert throttle.latency_baseline_seconds == pytest.approx(0.3)
+    for _ in range(20):
+        throttle.observe_latency(1.0)
+
+    assert throttle.adaptive_events == 1
+    assert throttle.adaptive_delay_seconds > 0.0
 
 
 def test_subthreshold_latency_does_not_slow_requests():

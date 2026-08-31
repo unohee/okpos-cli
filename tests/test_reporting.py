@@ -1,6 +1,9 @@
 """Failure reporting: one line per cause, not per occurrence."""
 
-from okpos_cli.cli import summarize_adaptive_throttle, summarize_failures
+import typer
+
+from okpos_cli.cli import _safety_exit, summarize_adaptive_throttle, summarize_failures
+from okpos_cli.safety import AccessBlocked
 from okpos_cli.throttle import HumanThrottle
 
 
@@ -61,3 +64,19 @@ def test_adaptive_throttle_summary_reports_measured_state():
     assert summary is not None
     assert "기준선 0.200초" in summary
     assert "적응 감속 1회" in summary
+
+
+def test_safety_exit_uses_distinct_exit_code(capsys):
+    throttle = HumanThrottle(max_requests=10)
+    throttle.request_count = 3
+
+    try:
+        _safety_exit(AccessBlocked("HTTP 403"), throttle)
+    except typer.Exit as exc:
+        assert exc.exit_code == 2
+    else:
+        raise AssertionError("expected typer.Exit")
+
+    output = capsys.readouterr().out
+    assert "안전 중단" in output
+    assert "3건 / 예산 10건" in output

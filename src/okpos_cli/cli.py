@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 from rich.console import Console
@@ -16,6 +17,7 @@ from .client import OkposClient
 from .config import load_config
 from .db import Store
 from .export import default_export_name, write_xlsx
+from .safety import SafetyStop
 from .scraper import date_range, resolve_targets, scrape
 from .shops import fetch_shops
 from .throttle import HumanThrottle
@@ -65,11 +67,40 @@ def summarize_adaptive_throttle(throttle: HumanThrottle) -> str | None:
     )
 
 
-def _connect(seed: int | None = None):
+def _safety_exit(
+    exc: SafetyStop,
+    throttle: HumanThrottle,
+    client: OkposClient | None = None,
+) -> NoReturn:
+    """Close the live session and turn a safety stop into a clean CLI exit."""
+    if client is not None:
+        try:
+            client.session.close()
+        except Exception:  # noqa: BLE001 - process is already stopping fail-closed
+            pass
+    console.print(f"[bold red]안전 중단[/] {type(exc).__name__}: {exc}")
+    console.print(
+        f"보낸 HTTP 요청 {throttle.request_count:,}건"
+        + (
+            f" / 예산 {throttle.max_requests:,}건"
+            if throttle.max_requests is not None
+            else ""
+        )
+    )
+    adaptive_summary = summarize_adaptive_throttle(throttle)
+    if adaptive_summary:
+        console.print(adaptive_summary)
+    raise typer.Exit(code=2)
+
+
+def _connect(seed: int | None = None, max_requests: int | None = None):
     cfg = load_config()
-    throttle = HumanThrottle(cfg.max_rps, seed=seed)
-    with console.status("[cyan]OKPOS 로그인 중..."):
-        session = login(cfg, throttle)
+    throttle = HumanThrottle(cfg.max_rps, max_requests=max_requests, seed=seed)
+    try:
+        with console.status("[cyan]OKPOS 로그인 중..."):
+            session = login(cfg, throttle)
+    except SafetyStop as exc:
+        _safety_exit(exc, throttle)
     console.print(f"[green]OK[/] {session.company}")
     return cfg, throttle, session
 
@@ -84,7 +115,11 @@ def _store_or_exit(cfg) -> Store:
 def check() -> None:
     """Verify credentials, session and the observed request rate."""
     cfg, throttle, session = _connect()
-    programs = fetch_catalog(session, throttle)
+    try:
+        programs = fetch_catalog(session, throttle)
+    except SafetyStop as exc:
+        session.close()
+        _safety_exit(exc, throttle)
     session.close()
     console.print(f"프로그램 카탈로그: [bold]{len(programs)}[/]개")
     console.print(
@@ -101,7 +136,11 @@ def menu_cmd(
 ) -> None:
     """List the program catalogue the server publishes."""
     _cfg, throttle, session = _connect()
-    programs = fetch_catalog(session, throttle)
+    try:
+        programs = fetch_catalog(session, throttle)
+    except SafetyStop as exc:
+        session.close()
+        _safety_exit(exc, throttle)
     session.close()
     if filter_class:
         needle = filter_class.lower()
@@ -131,7 +170,10 @@ def shops_cmd(
     """List the shops this account can see."""
     cfg, throttle, session = _connect()
     client = OkposClient(session, throttle, cfg)
-    shops = fetch_shops(client)
+    try:
+        shops = fetch_shops(client)
+    except SafetyStop as exc:
+        _safety_exit(exc, throttle, client)
     client.session.close()
 
     if as_json:
@@ -171,6 +213,12 @@ def scrape_cmd(  # noqa: PLR0913
     dry_run: bool = typer.Option(False, "--dry-run", help="Resolve screens, do not query"),
     to_db: bool = typer.Option(True, "--to-db/--no-db", help="Persist to Postgres"),
     limit: int = typer.Option(0, "--limit", help="Cap the number of screens (debugging)"),
+    max_requests: int = typer.Option(
+        10_000,
+        "--max-requests",
+        min=1,
+        help="Hard HTTP request budget; stop safely when exhausted",
+    ),
 ) -> None:
     """Crawl every program in the catalogue for the given date range."""
     if shop_cd and all_shops:
@@ -180,9 +228,12 @@ def scrape_cmd(  # noqa: PLR0913
     end = _parse_day(date_to) if date_to else start
     days = date_range(start, end)
 
-    cfg, throttle, session = _connect()
+    cfg, throttle, session = _connect(max_requests=max_requests)
     client = OkposClient(session, throttle, cfg)
-    programs = fetch_catalog(session, throttle)
+    try:
+        programs = fetch_catalog(session, throttle)
+    except SafetyStop as exc:
+        _safety_exit(exc, throttle, client)
     if filter_class:
         needle = filter_class.lower()
         programs = [
@@ -200,8 +251,11 @@ def scrape_cmd(  # noqa: PLR0913
 
     shop_codes: list[str] = []
     if all_shops:
-        with console.status("[cyan]매장 목록을 가져오는 중..."):
-            shops = fetch_shops(client)
+        try:
+            with console.status("[cyan]매장 목록을 가져오는 중..."):
+                shops = fetch_shops(client)
+        except SafetyStop as exc:
+            _safety_exit(exc, throttle, client)
         shop_codes = [s.code for s in shops]
         if not shop_codes:
             # fetch_shops may have re-logged in; close whatever is live now.
@@ -213,8 +267,13 @@ def scrape_cmd(  # noqa: PLR0913
             raise typer.Exit(1)
         console.print(f"매장 [bold]{len(shop_codes)}[/]개를 순회합니다")
 
-    with console.status(f"[cyan]{len(programs)}개 프로그램의 조회 화면을 해석하는 중..."):
-        targets = resolve_targets(client, programs, progress=console.print)
+    try:
+        with console.status(
+            f"[cyan]{len(programs)}개 프로그램의 조회 화면을 해석하는 중..."
+        ):
+            targets = resolve_targets(client, programs, progress=console.print)
+    except SafetyStop as exc:
+        _safety_exit(exc, throttle, client)
     if limit:
         targets = targets[:limit]
     shop_scoped = sum(1 for t in targets if t.spec.needs_shop)
@@ -222,9 +281,21 @@ def scrape_cmd(  # noqa: PLR0913
         f"조회 가능한 화면 [bold]{len(targets)}[/]개"
         f" (매장별 {shop_scoped}개) · 대상 날짜 {len(days)}일"
     )
-    if shop_codes:
-        planned = (len(targets) - shop_scoped) + shop_scoped * len(shop_codes)
-        console.print(f"예상 조회 조합: 약 [bold]{planned * len(days):,}[/]건")
+    planned_searches = sum(
+        target.spec.sheet_count
+        * (len(shop_codes) if target.spec.needs_shop and shop_codes else 1)
+        for target in targets
+    ) * len(days)
+    console.print(
+        f"예상 시트 조회: 약 [bold]{planned_searches:,}[/]건 · "
+        f"HTTP 요청 예산 {max_requests:,}건"
+    )
+    remaining_budget = max_requests - throttle.request_count
+    if planned_searches > remaining_budget and not dry_run:
+        console.print(
+            f"[yellow]현재 남은 예산 {remaining_budget:,}건 안에 끝나지 않을 수 있습니다. "
+            "예산에서 안전 중단되며 DB 증분 실행은 재실행 시 이어집니다.[/]"
+        )
 
     if dry_run:
         table = Table(title="조회 대상 (dry-run)")
@@ -240,10 +311,13 @@ def scrape_cmd(  # noqa: PLR0913
         client.session.close()
         return
 
-    stats = scrape(
-        client, targets, days, store=store, incremental=not full,
-        shop_cd=shop_cd, shops=shop_codes or None, progress=console.print,
-    )
+    try:
+        stats = scrape(
+            client, targets, days, store=store, incremental=not full,
+            shop_cd=shop_cd, shops=shop_codes or None, progress=console.print,
+        )
+    except SafetyStop as exc:
+        _safety_exit(exc, throttle, client)
     # `session` may have been replaced by a re-login; close the live one.
     client.session.close()
 
@@ -253,6 +327,7 @@ def scrape_cmd(  # noqa: PLR0913
         f"행 {stats.rows} · 스킵 {stats.skipped} · 실패 {len(stats.failures)}"
     )
     console.print(f"실측 피크 {throttle.observed_peak_rps():.0f} RPS (상한 {cfg.max_rps})")
+    console.print(f"보낸 HTTP 요청 {throttle.request_count:,}/{max_requests:,}건")
     adaptive_summary = summarize_adaptive_throttle(throttle)
     if adaptive_summary:
         console.print(adaptive_summary)

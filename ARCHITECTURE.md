@@ -36,9 +36,11 @@ JSON 엔드포인트가 있다.** IBSheet 그리드가 `<screen_dir>/ddd.htmlShe
 의존은 한 방향으로만 흐른다. 아래로 갈수록 상위다.
 
 ```
-config  throttle  screen        (외부 의존 없음, 순수)
-   ↓       ↓        ↓
-       auth                     (config + throttle)
+config  safety  throttle  screen  (외부 의존 없음, 순수)
+           ↓       ↓
+         transport               (safety + throttle)
+   ↓         ↓              ↓
+             auth                (config + transport)
         ↓
    catalog   client             (auth + screen)
               ↓
@@ -52,7 +54,9 @@ config  throttle  screen        (외부 의존 없음, 순수)
 | 모듈 | 책임 | 알아둘 것 |
 | --- | --- | --- |
 | `config.py` | `.env` 로딩, 로그인 URL을 base/path로 분리 | 자격증명 없으면 즉시 `SystemExit` |
-| `throttle.py` | 15 RPS 순차 간격 + 지터 + 응답시간 적응 감속 | 세 층 모두 **지연만 더한다** — 상한을 넘길 수 없다 |
+| `safety.py` | 장기 실행을 중단하는 공통 예외 | `SafetyStop` 계열은 화면별 예외 처리에서 절대 삼키지 않는다 |
+| `throttle.py` | 15 RPS 순차 간격 + 지터 + 적응 감속 + 요청 예산 | 페이싱은 **지연만 더하고**, 예산은 요청 전에 검사한다 |
+| `transport.py` | 물리 요청·리다이렉트·접근 차단·429/503 백오프 | 모든 HTTP 호출에 적용되는 공통 전송 정책 |
 | `screen.py` | 화면 HTML → 조회 스펙 | 순수 함수. 네트워크를 모른다 |
 | `auth.py` | 3단계 CSRF 릴레이 로그인 | 세션 토큰(`TokenKey`/`TokenVal`) 확보까지 |
 | `catalog.py` | `menuv.jsp` → `Program` 목록 | 수집 대상의 유일한 출처 |
@@ -70,7 +74,8 @@ config  throttle  screen        (외부 의존 없음, 순수)
    `auth`·`catalog`·`client` 어디서든 예외 없다. 지터와 적응 감속은 상한을 낮추기만 한다.
    페이싱은 토큰 버킷이 아니라 **순차 최소 간격**이라 버스트가 나오지 않는다.
    실측 지속 페이스는 약 3.3 RPS이고 상한에 걸리는 요청은 3.4%뿐이다.
-   첫 10개 응답의 중앙값이 실행별 기준선이고, EWMA 3배에서 감속·1.5배에서 회복한다.
+   첫 10개 응답의 중앙값(상한 0.3초)이 실행별 기준선이고, EWMA 3배에서
+   감속·1.5배에서 회복한다. 상한은 느린 시작 자체를 정상 상태로 학습하는 일을 막는다.
 2. **수집 대상은 서버가 정한다.** 화면 경로를 코드에 적지 않는다. 카탈로그와
    탭 확장 결과만 순회한다.
 3. **재실행은 중복이 아니라 갱신이다.** `okpos.record`는
@@ -82,6 +87,14 @@ config  throttle  screen        (외부 의존 없음, 순수)
 6. **성공은 확인한 것만 보고한다.** 예: `init-db`는 DDL 실행 후 실제 테이블
    목록을 조회해 셋이 다 있을 때만 성공으로 출력한다.
 7. **자격증명은 저장소에 들어가지 않는다.** `.env`는 gitignore이고 `.env.example`만 추적한다.
+8. **인프라 장애는 fail-closed다.** `ServerBusy`, 접근 차단, 세션 복구 소진,
+   요청 예산 소진은 즉시 전체 수집을 멈춘다. 연결 오류·타임아웃·5xx·깨진 JSON은
+   합산 3회 연속이면 회로차단기를 연다. `scraper`의 화면별 예외 격리는
+   `SafetyStop`을 다시 던진 뒤에만 일반 예외를 기록할 수 있다.
+9. **물리 HTTP 요청 수와 예산 계수는 같다.** `httpx` 자동 리다이렉트를 끄고
+   `transport.paced_request()`가 같은 origin의 각 홉을 별도로 페이싱·계수한다. 외부 origin과
+   10홉 초과 체인은 `UnsafeRedirect`로 중단한다. `auth`·`catalog`·`client`가 모두 이
+   래퍼를 사용하며 429/503의 `Retry-After`·2→4→8초 백오프도 이 한곳에서 처리한다.
 
 ## 데이터 모델
 
@@ -106,11 +119,12 @@ config  throttle  screen        (외부 의존 없음, 순수)
 - **날짜 필드 이름이 제각각.** `date1`, `date1_1`/`date1_2`, `S_DATE`/`E_DATE`,
   `t_SALE_DATE` 등. `ScreenSpec.date_fields`가 값 형태와 이름 패턴으로 추론한다.
 - **429는 이 서버에서 관측된 적이 없다.** 약 1,500회 동안 `200`과 `404`뿐이었고
-  rate-limit 헤더도 없다. `client`의 백오프는 대비이지 실측 기반이 아니며,
-  느린 응답은 적응 감속이 받지만 **연결 거부·타임아웃을 연속 실패로 세어 멈추는
-  서킷 브레이커는 아직 없다.**
+  rate-limit 헤더도 없다. `client`의 백오프는 대비이지 실측 기반이 아니다. 그래도
+  429·503이 백오프 뒤 계속되면 전체 수집을 멈추고, 연결 거부·타임아웃·5xx·깨진 JSON
+  응답은 3회 연속일 때 회로차단기를 연다.
 - **세션이 끊기면 JSON 대신 로그인 페이지가 온다.** JSON 파싱 실패로 나타나므로
-  파싱 오류와 세션 만료를 구분해야 한다 (`looks_like_login_page`).
+  파싱 오류와 세션 만료를 구분해야 한다 (`looks_like_login_page`). 재로그인 자체의
+  HTTP·전송·본문 오류는 모두 `SafetyStop`이므로 화면별 실패 처리에서 삼켜지지 않는다.
 - **월 단위 화면은 날짜 입력이 없다.** 서버 기본값(당월)으로만 조회된다.
 - **`code=-9 미등록 SQL Index`는 대개 내 요청 탓이다.** 서버가 어떤 SQL을 돌릴지
   고르는 파라미터가 비면 이 코드가 온다. 매장 트리(`shop_group_type_tree`)에서는
@@ -132,7 +146,8 @@ config  throttle  screen        (외부 의존 없음, 순수)
 
 - 매장 축과 날짜 축이 곱해지므로 `--all-shops`로 긴 기간을 돌리면 조회 수가
   빠르게 커진다 (매장별 화면 44개 × 16매장 × N일). 15 RPS 상한 아래에서
-  1일치가 수 분이다.
+  1일치가 수 분이다. 기본 10,000건 요청 예산이 실행을 유한하게 만들며, DB 증분
+  실행은 예산에서 중단돼도 재실행으로 이어간다. `--no-db`는 중간 진행을 보존하지 않는다.
 - 병렬 수집을 하지 않는다. `HumanThrottle`은 락을 들고 있어 병렬화에 대비돼
   있으나, 현재 `scraper`는 순차다.
 

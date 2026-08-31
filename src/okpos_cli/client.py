@@ -16,49 +16,23 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
 from .auth import FORM_CONTENT_TYPE, Session, encode_form, login
 from .config import Config
+from .safety import CircuitOpen, SafetyStop
 from .screen import ScreenSpec, parse_screen
 from .throttle import HumanThrottle
+from .transport import paced_request
 
 SHEET_ACTION = "ddd.htmlSheetAction"
 DATA_JSON = "/common/jsp/ajax/DataJson.jsp"
 
-# Statuses that mean "slow down" rather than "this request was wrong".
-# Not observed on this server in ~1,500 requests (it is plain Apache with no
-# rate-limit headers), but honouring them costs nothing if it ever starts.
-BUSY_STATUSES = frozenset({429, 503})
-BACKOFF_BASE_SECONDS = 2.0
-BACKOFF_MAX_SECONDS = 60.0
-MAX_BUSY_RETRIES = 3
-
-
-def parse_retry_after(
-    value: str | None, *, now: datetime | None = None
-) -> float | None:
-    """Seconds to wait per a Retry-After header, if it gives a usable delay."""
-    if not value:
-        return None
-    try:
-        seconds = float(value.strip())
-    except ValueError:
-        try:
-            retry_at = parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=UTC)
-        seconds = (retry_at - (now or datetime.now(UTC))).total_seconds()
-    return max(0.0, min(seconds, BACKOFF_MAX_SECONDS))
+MAX_CONSECUTIVE_INFRA_FAILURES = 3
 
 
 # When the session lapses the server answers with the login page instead of
@@ -69,6 +43,30 @@ _SESSION_LOST_RE = re.compile(r"login_form\.jsp|loginForm|/login/login_check", r
 def looks_like_login_page(text: str) -> bool:
     """Whether a response body is the login page rather than real content."""
     return bool(_SESSION_LOST_RE.search(text[:4000]))
+
+
+def _parse_api_envelope(body: Any) -> tuple[int, str, list[dict[str, Any]]]:
+    """Validate the shared Result/Data JSON shape without inventing empty success."""
+    if not isinstance(body, dict):
+        raise TypeError("top-level JSON value is not an object")
+    if "Result" not in body or not isinstance(body["Result"], dict):
+        raise TypeError("Result is missing or is not an object")
+    result = body["Result"]
+    if "Code" not in result:
+        raise TypeError("Result.Code is missing")
+    code = int(result["Code"])
+    message = str(result.get("Message") or "")
+
+    # A business error may legitimately omit Data. Its Result.Code is enough
+    # to record that one screen as failed without blaming the infrastructure.
+    if code != 0:
+        return code, message, []
+    if "Data" not in body:
+        raise TypeError("Data is missing from a successful response")
+    rows = body["Data"]
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise TypeError("Data is not a list of objects")
+    return code, message, rows
 
 
 class OkposApiError(RuntimeError):
@@ -91,12 +89,8 @@ class SheetResult:
         return self.code == 0
 
 
-class SessionExpired(RuntimeError):
+class SessionExpired(SafetyStop):
     """The server answered with the login page; the session is gone."""
-
-
-class ServerBusy(RuntimeError):
-    """The server asked us to back off and kept doing so."""
 
 
 class OkposClient:
@@ -119,6 +113,7 @@ class OkposClient:
         self.max_relogins = max_relogins
         self.relogin_count = 0
         self.busy_events = 0
+        self.consecutive_infra_failures = 0
         self._screens: dict[str, ScreenSpec] = {}
         # How each screen was opened. The shop tree, for one, parses into a
         # different screen without its query params, so a re-login has to
@@ -154,33 +149,54 @@ class OkposClient:
 
     # -- low level -----------------------------------------------------
 
-    def _send(self, build: Callable[[], httpx.Response], what: str) -> httpx.Response:
-        """Issue a request, backing off while the server says it is busy."""
-        for attempt in range(MAX_BUSY_RETRIES + 1):
-            resp = self.throttle.run_request(build)
-            if resp.status_code not in BUSY_STATUSES:
-                return resp
-            if attempt == MAX_BUSY_RETRIES:
-                raise ServerBusy(
-                    f"{what}: server returned {resp.status_code} "
-                    f"after {MAX_BUSY_RETRIES} back-offs"
-                )
-            wait = parse_retry_after(resp.headers.get("Retry-After"))
-            if wait is None:
-                wait = min(BACKOFF_BASE_SECONDS * (2**attempt), BACKOFF_MAX_SECONDS)
-            self.busy_events += 1
-            time.sleep(wait)
-        raise AssertionError("unreachable")
+    def _record_infra_failure(self, reason: str) -> None:
+        self.consecutive_infra_failures += 1
+        if self.consecutive_infra_failures >= MAX_CONSECUTIVE_INFRA_FAILURES:
+            raise CircuitOpen(
+                f"infrastructure failure circuit opened after "
+                f"{self.consecutive_infra_failures} consecutive failures: {reason}"
+            )
+
+    def _record_infra_success(self) -> None:
+        self.consecutive_infra_failures = 0
+
+    def _record_busy(self) -> None:
+        self.busy_events += 1
+
+    def _send(
+        self,
+        build: Callable[[], httpx.Response],
+        *,
+        record_success: bool = True,
+    ) -> httpx.Response:
+        """Classify one response after the shared transport policy has run."""
+        try:
+            resp = build()
+        except httpx.TransportError as exc:
+            self._record_infra_failure(type(exc).__name__)
+            raise
+        if resp.status_code >= 500:
+            self._record_infra_failure(f"HTTP {resp.status_code}")
+        elif record_success or not 200 <= resp.status_code < 300:
+            self._record_infra_success()
+        return resp
 
     def _post(self, path: str, data: dict[str, str], referer: str) -> httpx.Response:
         return self._send(
-            lambda: self.session.client.post(
+            lambda: paced_request(
+                self.session.client,
+                self.throttle,
+                "POST",
                 path,
                 content=encode_form(data),
                 headers={"Referer": str(self.session.client.base_url) + referer,
                          "Content-Type": FORM_CONTENT_TYPE},
+                on_busy=self._record_busy,
             ),
-            path,
+            # A 200 response is not an infrastructure success until its JSON
+            # body has parsed. Otherwise repeated proxy/login garbage would
+            # reset the circuit immediately before counting as a failure.
+            record_success=False,
         )
 
     def get_screen(
@@ -190,14 +206,17 @@ class OkposClient:
         if path in self._screens:
             return self._screens[path]
         resp = self._send(
-            lambda: self.session.client.get(
+            lambda: paced_request(
+                self.session.client,
+                self.throttle,
+                "GET",
                 path,
                 params=params or None,
                 headers={
                     "Referer": str(self.session.client.base_url) + "/login/top_frame.jsp"
                 },
+                on_busy=self._record_busy,
             ),
-            path,
         )
         resp.raise_for_status()
         # A screen never renders the login form, so seeing it means the session died.
@@ -242,7 +261,7 @@ class OkposClient:
         resp.raise_for_status()
         try:
             body = resp.json()
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             if looks_like_login_page(resp.text):
                 if not (retry and self.can_relogin):
                     raise SessionExpired(
@@ -255,13 +274,21 @@ class OkposClient:
                     spec.path, self._screen_params.get(spec.path), retry=False
                 )
                 return self.search(fresh, sheet_seq, overrides, retry=False)
+            self._record_infra_failure("non-JSON search response")
             raise OkposApiError(-97, f"non-JSON response: {exc}", spec.controller) from exc
 
-        result = body.get("Result") or {}
+        try:
+            code, message, rows = _parse_api_envelope(body)
+        except (TypeError, ValueError) as exc:
+            self._record_infra_failure("malformed JSON search response")
+            raise OkposApiError(
+                -97, f"malformed JSON response: {exc}", spec.controller
+            ) from exc
+        self._record_infra_success()
         return SheetResult(
-            rows=body.get("Data") or [],
-            code=int(result.get("Code", -1)),
-            message=result.get("Message", ""),
+            rows=rows,
+            code=code,
+            message=message,
         )
 
     def data_json(
@@ -274,10 +301,17 @@ class OkposClient:
             "/login/top_frame.jsp",
         )
         resp.raise_for_status()
-        body = resp.json()
-        if int((body.get("Result") or {}).get("Code", -1)) != 0:
-            raise OkposApiError(
-                int((body.get("Result") or {}).get("Code", -1)),
-                (body.get("Result") or {}).get("Message", ""),
-            )
-        return body.get("Data") or []
+        try:
+            body = resp.json()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._record_infra_failure("non-JSON DataJson response")
+            raise OkposApiError(-97, f"non-JSON response: {exc}") from exc
+        try:
+            code, message, rows = _parse_api_envelope(body)
+        except (TypeError, ValueError) as exc:
+            self._record_infra_failure("malformed JSON DataJson response")
+            raise OkposApiError(-97, f"malformed JSON response: {exc}") from exc
+        self._record_infra_success()
+        if code != 0:
+            raise OkposApiError(code, message)
+        return rows

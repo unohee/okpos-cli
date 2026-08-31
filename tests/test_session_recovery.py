@@ -1,10 +1,15 @@
 """Session recovery: an expired session must not silently halve a long crawl."""
 
+from datetime import date
+
 import httpx
 import pytest
 
+from okpos_cli.catalog import Program
 from okpos_cli.client import OkposClient, SessionExpired, looks_like_login_page
 from okpos_cli.config import Config
+from okpos_cli.safety import AccessBlocked
+from okpos_cli.scraper import Target, scrape
 from okpos_cli.screen import ScreenSpec
 from okpos_cli.throttle import HumanThrottle
 
@@ -141,3 +146,28 @@ def test_relogin_attempts_are_capped(monkeypatch):
     assert client.can_relogin is False
     with pytest.raises(SessionExpired):
         client.relogin()
+
+
+def test_relogin_safety_failure_aborts_the_whole_crawl(monkeypatch):
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        if request.url.path.endswith("SheetAction"):
+            calls += 1
+        return httpx.Response(200, text=LOGIN_PAGE)
+
+    def blocked_login(*_args):
+        raise AccessBlocked("login returned HTTP 401")
+
+    client = OkposClient(_FakeSession(handler), HumanThrottle(1000), _cfg())
+    monkeypatch.setattr("okpos_cli.client.login", blocked_login)
+    target = Target(
+        Program("P1", "program", _spec().path, "sale", "daily"),
+        _spec(),
+    )
+
+    with pytest.raises(AccessBlocked, match="HTTP 401"):
+        scrape(client, [target], [date(2026, 8, 1), date(2026, 8, 2)])
+
+    assert calls == 1

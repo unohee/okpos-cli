@@ -11,8 +11,12 @@ import json
 import re
 from dataclasses import dataclass
 
+import httpx
+
 from .auth import Session
+from .safety import RequiredResourceUnavailable, SafetyStop
 from .throttle import HumanThrottle
+from .transport import paced_request
 
 _AL_RE = re.compile(r"var\s+AL\s*=\s*(\[.*?\]);", re.S)
 
@@ -48,19 +52,39 @@ class Program:
 
 def fetch_catalog(session: Session, throttle: HumanThrottle) -> list[Program]:
     """Download and parse the full program menu."""
-    resp = throttle.run_request(
-        lambda: session.client.get(
+    try:
+        resp = paced_request(
+            session.client,
+            throttle,
+            "GET",
             "/login/menuv.jsp",
             headers={"Referer": str(session.client.base_url) + "/login/top_frame.jsp"},
         )
-    )
-    resp.raise_for_status()
+    except SafetyStop:
+        raise
+    except httpx.TransportError as exc:
+        raise RequiredResourceUnavailable(
+            f"program catalog transport failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    if resp.status_code >= 400:
+        raise RequiredResourceUnavailable(
+            f"program catalog returned HTTP {resp.status_code}"
+        )
     m = _AL_RE.search(resp.text)
     if not m:
-        raise RuntimeError("Program menu (var AL) not found in /login/menuv.jsp")
+        raise RequiredResourceUnavailable(
+            "Program menu (var AL) not found in /login/menuv.jsp"
+        )
 
-    programs = []
-    for row in json.loads(m.group(1)):
+    try:
+        rows = json.loads(m.group(1))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RequiredResourceUnavailable(f"program catalog JSON is invalid: {exc}") from exc
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise RequiredResourceUnavailable("program catalog JSON is not a list of objects")
+
+    programs: list[Program] = []
+    for row in rows:
         path = row.get("PGM_FILE_NM") or ""
         if not path.endswith(".jsp") and ".jsp" not in path:
             continue
@@ -73,4 +97,6 @@ def fetch_catalog(session: Session, throttle: HumanThrottle) -> list[Program]:
                 m_class=row.get("PGM_MCLS_NM", ""),
             )
         )
+    if not programs:
+        raise RequiredResourceUnavailable("program catalog contains no JSP programs")
     return programs

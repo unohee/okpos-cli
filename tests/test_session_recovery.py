@@ -148,6 +148,33 @@ def test_relogin_attempts_are_capped(monkeypatch):
         client.relogin()
 
 
+def test_relogin_does_not_open_second_session_when_close_fails(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=LOGIN_PAGE)
+
+    expired = _FakeSession(handler)
+    client = OkposClient(expired, HumanThrottle(1000), _cfg())
+    login_calls = 0
+
+    def close_fails() -> None:
+        raise RuntimeError("close failed")
+
+    def replacement_login(*_args):
+        nonlocal login_calls
+        login_calls += 1
+        return _FakeSession(handler)
+
+    monkeypatch.setattr(expired, "close", close_fails)
+    monkeypatch.setattr("okpos_cli.client.login", replacement_login)
+
+    with pytest.raises(SessionExpired, match="could not close.*RuntimeError"):
+        client.relogin()
+
+    assert login_calls == 0
+    assert client.relogin_count == 0
+    assert client.session is expired
+
+
 def test_relogin_safety_failure_aborts_the_whole_crawl(monkeypatch):
     calls = 0
 

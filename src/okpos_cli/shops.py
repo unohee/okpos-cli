@@ -45,7 +45,7 @@ class Shop:
     def clean_name(self) -> str:
         """Strip the `[CODE] ` prefix the tree prepends to every shop name."""
         prefix = f"[{self.code}] "
-        return self.name[len(prefix):] if self.name.startswith(prefix) else self.name
+        return self.name[len(prefix) :] if self.name.startswith(prefix) else self.name
 
 
 SEED_SCREEN = "/sale/sale/day_detail010.jsp"
@@ -59,7 +59,9 @@ def fetch_shops(client: OkposClient, seed_screen: str = SEED_SCREEN) -> list[Sho
     """
     seed = client.get_screen(seed_screen)
     if not seed.shop_token:
-        raise OkposApiError(-96, f"{seed_screen} has no shop picker to source a token from")
+        raise OkposApiError(
+            -96, f"{seed_screen} has no shop picker to source a token from"
+        )
 
     spec = client.get_screen(
         TREE_PATH,

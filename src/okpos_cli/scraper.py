@@ -67,7 +67,9 @@ def resolve_targets(
             spec = client.get_screen(prog.screen_path, prog.query_params)
         except SafetyStop:
             raise
-        except Exception as exc:  # noqa: BLE001 - one bad screen must not stop the crawl
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - one bad screen must not stop the crawl
             if progress:
                 progress(f"[yellow]skip[/] {prog.screen_path}: {type(exc).__name__}")
             continue
@@ -94,13 +96,23 @@ def resolve_targets(
 
 
 def _persist_failure(
-    store: Store | None, spec: ScreenSpec, seq: int, scope: str, biz_date: date, message: str
+    store: Store | None,
+    spec: ScreenSpec,
+    seq: int,
+    scope: str,
+    biz_date: date,
+    message: str,
 ) -> None:
     if store:
         store.mark_run(
-            controller=spec.controller, sheet_seq=seq, shop_cd=scope,
-            biz_date=biz_date, screen_path=spec.path, row_count=0,
-            status="error", message=message,
+            controller=spec.controller,
+            sheet_seq=seq,
+            shop_cd=scope,
+            biz_date=biz_date,
+            screen_path=spec.path,
+            row_count=0,
+            status="error",
+            message=message,
         )
 
 
@@ -142,9 +154,17 @@ def scrape(  # noqa: PLR0913
                 if scope:
                     overrides["ss_SHOP_CD"] = scope
                 _search_sheets(
-                    client, target, scope, biz_date, overrides,
-                    store=store, done=done, done_any=done_any,
-                    stats=stats, progress=progress, sink=sink,
+                    client,
+                    target,
+                    scope,
+                    biz_date,
+                    overrides,
+                    store=store,
+                    done=done,
+                    done_any=done_any,
+                    stats=stats,
+                    progress=progress,
+                    sink=sink,
                 )
     return stats
 
@@ -200,7 +220,10 @@ def _search_sheets(  # noqa: PLR0913
         stats.searches += 1
         if not result.ok:
             stats.failures.append(
-                (f"{spec.controller}#{seq}@{iso}", f"code={result.code} {result.message}")
+                (
+                    f"{spec.controller}#{seq}@{iso}",
+                    f"code={result.code} {result.message}",
+                )
             )
             _persist_failure(store, spec, seq, scope, biz_date, result.message)
             continue
@@ -208,14 +231,22 @@ def _search_sheets(  # noqa: PLR0913
         stats.rows += len(result.rows)
         if store:
             store.save_rows(
-                program_cd=target.program.code, controller=spec.controller,
-                screen_path=spec.path, sheet_seq=seq, shop_cd=scope,
-                biz_date=biz_date, rows=result.rows,
+                program_cd=target.program.code,
+                controller=spec.controller,
+                screen_path=spec.path,
+                sheet_seq=seq,
+                shop_cd=scope,
+                biz_date=biz_date,
+                rows=result.rows,
             )
             store.mark_run(
-                controller=spec.controller, sheet_seq=seq, shop_cd=scope,
-                biz_date=biz_date, screen_path=spec.path,
-                row_count=len(result.rows), status="ok",
+                controller=spec.controller,
+                sheet_seq=seq,
+                shop_cd=scope,
+                biz_date=biz_date,
+                screen_path=spec.path,
+                row_count=len(result.rows),
+                status="ok",
             )
         if sink:
             sink(target, seq, biz_date, result.rows)

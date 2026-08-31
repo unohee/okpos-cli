@@ -19,6 +19,7 @@ from datetime import date
 from typing import Any
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 
 SCHEMA_SQL = """
@@ -92,7 +93,9 @@ class Store:
         return [r["tablename"] for r in rows]
 
     def save_programs(self, programs) -> int:
-        rows = [(p.code, p.name, p.path, p.l_class, p.m_class) for p in programs if p.code]
+        rows = [
+            (p.code, p.name, p.path, p.l_class, p.m_class) for p in programs if p.code
+        ]
         if not rows:
             return 0
         with self.connect() as conn, conn.cursor() as cur:
@@ -177,8 +180,16 @@ class Store:
                     message = EXCLUDED.message, screen_path = EXCLUDED.screen_path,
                     scraped_at = now()
                 """,
-                (controller, sheet_seq, shop_cd, biz_date, screen_path,
-                 row_count, status, message[:500]),
+                (
+                    controller,
+                    sheet_seq,
+                    shop_cd,
+                    biz_date,
+                    screen_path,
+                    row_count,
+                    status,
+                    message[:500],
+                ),
             )
             conn.commit()
 
@@ -195,7 +206,9 @@ class Store:
                 """,
                 (biz_dates,),
             ).fetchall()
-        return {(r["controller"], r["sheet_seq"], r["shop_cd"], r["biz_date"]) for r in rows}
+        return {
+            (r["controller"], r["sheet_seq"], r["shop_cd"], r["biz_date"]) for r in rows
+        }
 
     def completed_any_scope(self, biz_dates: list[date]) -> set[tuple[str, int, date]]:
         """Keys done under *any* shop scope.
@@ -225,27 +238,32 @@ class Store:
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> list[dict[str, Any]]:
-        clauses, params = [], []
+        clauses: list[sql.Composable] = []
+        params: list[Any] = []
         if controller:
-            clauses.append("controller = %s")
+            clauses.append(sql.SQL("controller = %s"))
             params.append(controller)
         if date_from:
-            clauses.append("biz_date >= %s")
+            clauses.append(sql.SQL("biz_date >= %s"))
             params.append(date_from)
         if date_to:
-            clauses.append("biz_date <= %s")
+            clauses.append(sql.SQL("biz_date <= %s"))
             params.append(date_to)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = (
+            sql.SQL("WHERE {}").format(sql.SQL(" AND ").join(clauses))
+            if clauses
+            else sql.SQL("")
+        )
+        query = sql.SQL(
+            """
+            SELECT controller, screen_path, sheet_seq, shop_cd, biz_date,
+                   row_no, payload, scraped_at
+            FROM okpos.record {}
+            ORDER BY controller, biz_date, sheet_seq, row_no
+            """
+        ).format(where)
         with self.connect() as conn:
-            return conn.execute(
-                f"""
-                SELECT controller, screen_path, sheet_seq, shop_cd, biz_date,
-                       row_no, payload, scraped_at
-                FROM okpos.record {where}
-                ORDER BY controller, biz_date, sheet_seq, row_no
-                """,
-                params,
-            ).fetchall()
+            return conn.execute(query, params).fetchall()
 
     def controllers(self) -> list[dict[str, Any]]:
         with self.connect() as conn:

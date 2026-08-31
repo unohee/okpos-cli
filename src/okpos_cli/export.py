@@ -48,7 +48,7 @@ def write_xlsx(records: list[dict[str, Any]], out_path: Path) -> tuple[Path, int
     for controller, rows in sorted(grouped.items()):
         payload_keys: list[str] = []
         for rec in rows:
-            for k in (rec["payload"] or {}):
+            for k in rec["payload"] or {}:
                 if k not in payload_keys:
                     payload_keys.append(k)
 
@@ -68,7 +68,11 @@ def write_xlsx(records: list[dict[str, Any]], out_path: Path) -> tuple[Path, int
                     rec["shop_cd"],
                     rec["sheet_seq"],
                     rec["row_no"],
-                    scraped.replace(tzinfo=None) if isinstance(scraped, datetime) else scraped,
+                    (
+                        scraped.replace(tzinfo=None)
+                        if isinstance(scraped, datetime)
+                        else scraped
+                    ),
                 ]
                 + [payload.get(k) for k in payload_keys]
             )

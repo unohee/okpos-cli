@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from functools import partial
 
 import httpx
 
@@ -62,20 +63,16 @@ def _paced_redirect_chain(
     current_params = params
 
     for followed in range(max_redirects + 1):
-        response = throttle.run_request(
-            lambda request_method=current_method,
-            request_url=current_url,
-            request_content=current_content,
-            request_headers=current_headers,
-            request_params=current_params: client.request(
-                request_method,
-                request_url,
-                content=request_content,
-                headers=request_headers,
-                params=request_params,
-                follow_redirects=False,
-            )
+        send_current = partial(
+            client.request,
+            current_method,
+            current_url,
+            content=current_content,
+            headers=current_headers,
+            params=current_params,
+            follow_redirects=False,
         )
+        response = throttle.run_request(send_current)
         if response.status_code in ACCESS_BLOCKED_STATUSES:
             status = response.status_code
             response_url = response.url

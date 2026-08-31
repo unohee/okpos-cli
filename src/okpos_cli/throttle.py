@@ -87,7 +87,10 @@ class HumanThrottle:
     def wait(self) -> None:
         """Block until the next request is allowed to go out."""
         with self._lock:
-            if self.max_requests is not None and self.request_count >= self.max_requests:
+            if (
+                self.max_requests is not None
+                and self.request_count >= self.max_requests
+            ):
                 raise RequestBudgetExceeded(
                     f"HTTP request budget exhausted ({self.request_count}/{self.max_requests})"
                 )
@@ -98,9 +101,7 @@ class HumanThrottle:
             # The ceiling is the floor of the gap. Jitter and adaptive slowdown
             # only push the next request later, never above max_rps.
             self._next_allowed = (
-                start
-                + max(self._min_interval, delay)
-                + self.adaptive_delay_seconds
+                start + max(self._min_interval, delay) + self.adaptive_delay_seconds
             )
             sleep_for = start - now
         if sleep_for > 0:
@@ -142,10 +143,7 @@ class HumanThrottle:
 
             baseline = self.latency_baseline_seconds
             current = self.latency_ewma_seconds or baseline
-            ewma = (
-                ADAPTIVE_EWMA_ALPHA * seconds
-                + (1.0 - ADAPTIVE_EWMA_ALPHA) * current
-            )
+            ewma = ADAPTIVE_EWMA_ALPHA * seconds + (1.0 - ADAPTIVE_EWMA_ALPHA) * current
             self.latency_ewma_seconds = ewma
             ratio = ewma / baseline
             previous_delay = self.adaptive_delay_seconds

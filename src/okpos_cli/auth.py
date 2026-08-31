@@ -48,6 +48,7 @@ def encode_form(fields: dict[str, str]) -> bytes:
         fields, encoding=FORM_CHARSET, errors="xmlcharrefreplace"
     ).encode("ascii")
 
+
 _CSRF_RE = re.compile(
     r"<input[^>]*type=['\"]hidden['\"][^>]*"
     r"name=['\"]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})['\"]"
@@ -157,7 +158,9 @@ def login(cfg: Config, throttle: HumanThrottle | None = None) -> Session:
         _require_login_response(top, "top frame")
         tk, tv = _TOKEN_KEY_RE.search(top.text), _TOKEN_VAL_RE.search(top.text)
         if not tk or not tv:
-            raise LoginError("Session token (TokenKey/TokenVal) missing from top_frame.jsp")
+            raise LoginError(
+                "Session token (TokenKey/TokenVal) missing from top_frame.jsp"
+            )
 
         title = re.search(r"<title>([^<]*)</title>", top.text)
         return Session(

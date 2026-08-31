@@ -79,9 +79,13 @@ def fetch_catalog(session: Session, throttle: HumanThrottle) -> list[Program]:
     try:
         rows = json.loads(m.group(1))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RequiredResourceUnavailable(f"program catalog JSON is invalid: {exc}") from exc
+        raise RequiredResourceUnavailable(
+            f"program catalog JSON is invalid: {exc}"
+        ) from exc
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise RequiredResourceUnavailable("program catalog JSON is not a list of objects")
+        raise RequiredResourceUnavailable(
+            "program catalog JSON is not a list of objects"
+        )
 
     programs: list[Program] = []
     for row in rows:

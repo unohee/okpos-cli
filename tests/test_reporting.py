@@ -80,3 +80,26 @@ def test_safety_exit_uses_distinct_exit_code(capsys):
     output = capsys.readouterr().out
     assert "안전 중단" in output
     assert "3건 / 예산 10건" in output
+
+
+def test_safety_exit_reports_session_close_failure(capsys):
+    class BrokenSession:
+        def close(self) -> None:
+            raise RuntimeError("must not be hidden")
+
+    class Client:
+        session = BrokenSession()
+
+    throttle = HumanThrottle(max_requests=10)
+
+    try:
+        _safety_exit(AccessBlocked("HTTP 403"), throttle, Client())  # type: ignore[arg-type]
+    except typer.Exit as exc:
+        assert exc.exit_code == 2
+    else:
+        raise AssertionError("expected typer.Exit")
+
+    output = capsys.readouterr().out
+    assert "세션 종료 경고" in output
+    assert "RuntimeError" in output
+    assert "must not be hidden" not in output

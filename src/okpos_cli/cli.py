@@ -76,8 +76,12 @@ def _safety_exit(
     if client is not None:
         try:
             client.session.close()
-        except Exception:  # noqa: BLE001 - process is already stopping fail-closed
-            pass
+        except Exception as close_exc:  # noqa: BLE001
+            # 종료 실패 자체를 숨기지는 않되 원래의 fail-closed 종료를 계속한다.
+            console.print(
+                "[yellow]세션 종료 경고[/] "
+                f"{type(close_exc).__name__}; 프로세스 종료를 계속합니다."
+            )
     console.print(f"[bold red]안전 중단[/] {type(exc).__name__}: {exc}")
     console.print(
         f"보낸 HTTP 요청 {throttle.request_count:,}건"
@@ -131,7 +135,9 @@ def check() -> None:
 
 @app.command("menu")
 def menu_cmd(
-    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a table"),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit raw JSON instead of a table"
+    ),
     filter_class: str = typer.Option("", "--class", help="Filter by menu class name"),
 ) -> None:
     """List the program catalogue the server publishes."""
@@ -145,7 +151,8 @@ def menu_cmd(
     if filter_class:
         needle = filter_class.lower()
         programs = [
-            p for p in programs
+            p
+            for p in programs
             if needle in p.l_class.lower() or needle in p.m_class.lower()
         ]
 
@@ -165,7 +172,9 @@ def menu_cmd(
 
 @app.command("shops")
 def shops_cmd(
-    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a table"),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit raw JSON instead of a table"
+    ),
 ) -> None:
     """List the shops this account can see."""
     cfg, throttle, session = _connect()
@@ -205,14 +214,20 @@ def scrape_cmd(  # noqa: PLR0913
     date_from: str = typer.Option(..., "--from", help="Start date, YYYY-MM-DD"),
     date_to: str = typer.Option("", "--to", help="End date (defaults to --from)"),
     filter_class: str = typer.Option("", "--class", help="Only this menu class"),
-    shop_cd: str = typer.Option("", "--shop", help="Single shop code for shop-scoped screens"),
+    shop_cd: str = typer.Option(
+        "", "--shop", help="Single shop code for shop-scoped screens"
+    ),
     all_shops: bool = typer.Option(
         False, "--all-shops", help="Repeat shop-scoped screens for every visible shop"
     ),
     full: bool = typer.Option(False, "--full", help="Ignore prior runs and re-scrape"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Resolve screens, do not query"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Resolve screens, do not query"
+    ),
     to_db: bool = typer.Option(True, "--to-db/--no-db", help="Persist to Postgres"),
-    limit: int = typer.Option(0, "--limit", help="Cap the number of screens (debugging)"),
+    limit: int = typer.Option(
+        0, "--limit", help="Cap the number of screens (debugging)"
+    ),
     max_requests: int = typer.Option(
         10_000,
         "--max-requests",
@@ -237,7 +252,8 @@ def scrape_cmd(  # noqa: PLR0913
     if filter_class:
         needle = filter_class.lower()
         programs = [
-            p for p in programs
+            p
+            for p in programs
             if needle in p.l_class.lower() or needle in p.m_class.lower()
         ]
 
@@ -303,9 +319,11 @@ def scrape_cmd(  # noqa: PLR0913
             table.add_column(col, overflow="fold")
         for t in targets:
             table.add_row(
-                t.spec.controller, str(t.spec.sheet_count),
+                t.spec.controller,
+                str(t.spec.sheet_count),
                 ",".join(t.spec.date_fields) or "-",
-                "Y" if t.spec.needs_shop else "-", str(len(t.spec.columns)),
+                "Y" if t.spec.needs_shop else "-",
+                str(len(t.spec.columns)),
             )
         console.print(table)
         client.session.close()
@@ -313,8 +331,14 @@ def scrape_cmd(  # noqa: PLR0913
 
     try:
         stats = scrape(
-            client, targets, days, store=store, incremental=not full,
-            shop_cd=shop_cd, shops=shop_codes or None, progress=console.print,
+            client,
+            targets,
+            days,
+            store=store,
+            incremental=not full,
+            shop_cd=shop_cd,
+            shops=shop_codes or None,
+            progress=console.print,
         )
     except SafetyStop as exc:
         _safety_exit(exc, throttle, client)
@@ -326,7 +350,9 @@ def scrape_cmd(  # noqa: PLR0913
         f"[bold green]완료[/] 화면 {stats.screens} · 조회 {stats.searches} · "
         f"행 {stats.rows} · 스킵 {stats.skipped} · 실패 {len(stats.failures)}"
     )
-    console.print(f"실측 피크 {throttle.observed_peak_rps():.0f} RPS (상한 {cfg.max_rps})")
+    console.print(
+        f"실측 피크 {throttle.observed_peak_rps():.0f} RPS (상한 {cfg.max_rps})"
+    )
     console.print(f"보낸 HTTP 요청 {throttle.request_count:,}/{max_requests:,}건")
     adaptive_summary = summarize_adaptive_throttle(throttle)
     if adaptive_summary:
@@ -377,12 +403,14 @@ def status() -> None:
     for r in rows:
         total += r["rows"]
         table.add_row(
-            r["controller"], r["name"], str(r["first_date"]),
-            str(r["last_date"]), f"{r['rows']:,}",
+            r["controller"],
+            r["name"],
+            str(r["first_date"]),
+            str(r["last_date"]),
+            f"{r['rows']:,}",
         )
     console.print(table)
     console.print(f"합계 [bold]{total:,}[/] 행")
-
 
 
 def main() -> None:

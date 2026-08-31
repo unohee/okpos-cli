@@ -138,11 +138,14 @@ class OkposClient:
             raise SessionExpired(
                 f"session expired again after {self.relogin_count} re-logins; giving up"
             )
-        self.relogin_count += 1
         try:
             self.session.close()
-        except Exception:  # noqa: BLE001 - the old session is being discarded anyway
-            pass
+        except Exception as exc:  # noqa: BLE001 - do not open a second live session
+            raise SessionExpired(
+                "could not close the expired session safely before re-login: "
+                f"{type(exc).__name__}"
+            ) from exc
+        self.relogin_count += 1
         self.session = login(self.config, self.throttle)
         # Specs carry the dead session's CSRF field; the params do not.
         self._screens.clear()
@@ -189,8 +192,10 @@ class OkposClient:
                 "POST",
                 path,
                 content=encode_form(data),
-                headers={"Referer": str(self.session.client.base_url) + referer,
-                         "Content-Type": FORM_CONTENT_TYPE},
+                headers={
+                    "Referer": str(self.session.client.base_url) + referer,
+                    "Content-Type": FORM_CONTENT_TYPE,
+                },
                 on_busy=self._record_busy,
             ),
             # A 200 response is not an infrastructure success until its JSON
@@ -213,7 +218,8 @@ class OkposClient:
                 path,
                 params=params or None,
                 headers={
-                    "Referer": str(self.session.client.base_url) + "/login/top_frame.jsp"
+                    "Referer": str(self.session.client.base_url)
+                    + "/login/top_frame.jsp"
                 },
                 on_busy=self._record_busy,
             ),
@@ -275,7 +281,9 @@ class OkposClient:
                 )
                 return self.search(fresh, sheet_seq, overrides, retry=False)
             self._record_infra_failure("non-JSON search response")
-            raise OkposApiError(-97, f"non-JSON response: {exc}", spec.controller) from exc
+            raise OkposApiError(
+                -97, f"non-JSON response: {exc}", spec.controller
+            ) from exc
 
         try:
             code, message, rows = _parse_api_envelope(body)
